@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>接受腔AI设计台Demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">AI</div>
+          <div>
+            <h1>接受腔AI设计台</h1>
+            <p>临床引导式原型</p>
+          </div>
+        </div>
+
+        <div class="case-card">
+          <span class="eyebrow">当前病例</span>
+          <strong contenteditable="true" spellcheck="false">张某 · 右下肢截肢</strong>
+          <small contenteditable="true" spellcheck="false">K3 活动等级 · 初次建模</small>
+        </div>
+
+        <nav class="steps" aria-label="流程导航">
+          <button class="step active" data-step="scan"><span>1</span>导入扫描</button>
+          <button class="step" data-step="landmarks"><span>2</span>识别解剖点</button>
+          <button class="step" data-step="ai"><span>3</span>AI参数建议</button>
+          <button class="step" data-step="edit"><span>4</span>手动精修</button>
+          <button class="step" data-step="export"><span>5</span>制造输出</button>
+        </nav>
+
+        <div class="version-panel">
+          <span class="eyebrow">版本时间线</span>
+          <div class="timeline">
+            <button class="version active">V1 AI初版</button>
+            <button class="version">V2 试穿修正</button>
+            <button class="version">V3 复诊优化</button>
+          </div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h2>输入残肢模型，生成可解释的初始接受腔</h2>
+          </div>
+          <div class="top-actions">
+            <label class="ghost-button">
+              <input id="fileInput" type="file" accept=".stl,.obj" />
+              导入 STL/OBJ
+            </label>
+            <button id="sampleBtn" class="ghost-button">使用示例残肢</button>
+            <button id="generateBtn" class="primary-button">算法生成接受腔</button>
+            <button id="geminiBtn" class="primary-button refine">AI复核优化</button>
+          </div>
+        </header>
+
+        <section class="stage">
+          <div id="viewer" class="viewer"></div>
+          <div class="viewer-toolbar" aria-label="模型显示控制">
+            <button id="viewBoth" class="tool active">残肢+接受腔</button>
+            <button id="viewSocket" class="tool">仅接受腔</button>
+            <button id="viewLimb" class="tool">仅残肢</button>
+            <button id="semanticBtn" class="tool active">语义标签</button>
+            <button id="sectionBtn" class="tool">剖切预览</button>
+            <button id="paintBtn" class="tool">局部减压画笔</button>
+          </div>
+          <div id="hint" class="hint">可拖拽旋转、滚轮缩放。点击“AI生成接受腔”后可用画笔在模型上添加局部减压。</div>
+        </section>
+      </main>
+
+      <aside class="inspector">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">AI建议区</span>
+              <h3>初始设计推理</h3>
+            </div>
+            <span id="aiState" class="status">待生成</span>
+          </div>
+          <div id="recommendations" class="recommendations">
+            <div class="empty">导入或使用示例残肢后，AI会根据几何尺寸和活动等级生成接受腔初版。</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">AI语义标签</span>
+              <h3>残肢分区结果</h3>
+            </div>
+          </div>
+          <div id="semanticTags" class="semantic-tags">
+            <div class="empty">导入残肢模型后，系统会自动完成语义标签分割。</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">患者画像 Context</span>
+              <h3>动态调整系数</h3>
+            </div>
+          </div>
+          <div class="control">
+            <label for="activityLevel">活动等级</label>
+            <select id="activityLevel">
+              <option value="K2">K2 日常步行</option>
+              <option value="K3" selected>K3 社区活动</option>
+              <option value="K4">K4 高活动</option>
+            </select>
+          </div>
+          <div class="control">
+            <label for="bodyWeight">体重 <output id="weightOut">70 kg</output></label>
+            <input id="bodyWeight" type="range" min="40" max="110" step="1" value="70" />
+          </div>
+          <div class="control">
+            <label for="tissueFirmness">残肢软组织</label>
+            <select id="tissueFirmness">
+              <option value="firm">Firm 紧实</option>
+              <option value="balanced" selected>Balanced 中等</option>
+              <option value="fleshy">Fleshy 松软</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">模型精修</span>
+              <h3>参数编辑</h3>
+            </div>
+          </div>
+          <div class="control">
+            <label for="offset">整体包容量 <output id="offsetOut">6.0 mm</output></label>
+            <input id="offset" type="range" min="0.5" max="14" step="0.5" value="3" />
+          </div>
+          <div class="control">
+            <label for="trim">近端修边高度 <output id="trimOut">70%</output></label>
+            <input id="trim" type="range" min="50" max="90" step="1" value="70" />
+          </div>
+          <div class="control">
+            <label for="relief">胫骨前缘减压 <output id="reliefOut">4.0 mm</output></label>
+            <input id="relief" type="range" min="0" max="10" step="0.5" value="4" />
+          </div>
+          <div class="control">
+            <label for="brushStrength">画笔幅度 <output id="brushStrengthOut">1.5 mm</output></label>
+            <input id="brushStrength" type="range" min="0.2" max="5" step="0.1" value="1.5" />
+          </div>
+          <div class="control">
+            <label for="distal">末端包容 <output id="distalOut">8.0 mm</output></label>
+            <input id="distal" type="range" min="0" max="18" step="0.5" value="8" />
+          </div>
+          <div class="toggle-row">
+            <label><input id="semanticToggle" type="checkbox" checked /> 语义标签</label>
+            <label><input id="wireToggle" type="checkbox" checked /> 网格线</label>
+          </div>
+        </section>
+
+        <section class="panel compact">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">版本计算</span>
+              <h3>Delta 与体积守恒</h3>
+            </div>
+          </div>
+          <div id="versionDelta" class="version-delta">
+            <div class="empty">生成接受腔后，系统会记录版本参数与体积补偿 Delta。</div>
+          </div>
+        </section>
+
+        <section class="panel compact">
+          <div id="geminiResult" class="gemini-result">
+            <span class="eyebrow">大模型复核</span>
+            <div class="empty">生成初版后，可调用 Gemini 分析参数和预览图，返回结构化校正结果。</div>
+          </div>
+          <div class="metric-grid">
+            <div><span>扫描高度</span><strong id="heightMetric">--</strong></div>
+            <div><span>最大围度</span><strong id="circMetric">--</strong></div>
+            <div><span>释放体积</span><strong id="volumeMetric">--</strong></div>
+            <div><span>版本Delta</span><strong id="deltaMetric">--</strong></div>
+            <div><span>壁厚建议</span><strong id="wallMetric">--</strong></div>
+            <div><span>打印预检</span><strong id="printMetric">--</strong></div>
+          </div>
+          <button id="exportBtn" class="secondary-button">导出接受腔 STL</button>
+        </section>
+      </aside>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "../node_modules/three/build/three.module.js",
+          "three/addons/": "../node_modules/three/examples/jsm/"
+        }
+      }
+    </script>
+    <script type="module" src="./renderer.js?v=import-loading-20260602"></script>
+  </body>
+</html>

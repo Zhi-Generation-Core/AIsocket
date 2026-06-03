@@ -1,0 +1,46 @@
+{
+  "name": "socket-ai-designer-demo",
+  "version": "0.1.0",
+  "description": "AI-assisted prosthetic socket design demo for clinical guided workflow.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/start-launcher.js",
+    "start:electron": "electron .",
+    "dist": "electron-builder --win portable --x64"
+  },
+  "author": "Information Product Design Week 9",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "three": "^0.176.0"
+  },
+  "devDependencies": {
+    "electron": "^30.5.1",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "edu.zju.socket-ai-designer",
+    "productName": "接受腔AI设计台Demo",
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "../release"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "SocketAI-Designer-Demo.exe"
+    }
+  }
+}

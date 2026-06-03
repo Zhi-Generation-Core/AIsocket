@@ -1,0 +1,17 @@
+.env
+*.env
+
+__pycache__/
+*.py[cod]
+
+node_modules/
+AIsocket/
+
+dist/
+build/
+out/
+release/
+*.log
+
+.DS_Store
+Thumbs.db
