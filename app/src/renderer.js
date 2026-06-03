@@ -1647,7 +1647,7 @@ function setLimb(mesh, profile = null) {
   metrics = calculateMetrics(modelProfile);
   updateMetrics(false);
   setAiState('待生成');
-  recommendations.innerHTML = '<div class="empty">残肢模型已载入，AI语义标签已生成。点击“AI生成接受腔”，系统会按不同标签自动匹配包容、减压和承重调整。</div>';
+  recommendations.innerHTML = '<div class="empty">残肢模型已载入，AI 语义标签已生成。点击“算法生成接受腔”，系统会按不同标签自动匹配包容、减压和承重调整。</div>';
   geminiResult.innerHTML = '<span class="eyebrow">大模型复核</span><div class="empty">生成初版后，可调用 Gemini 分析参数、预览图和风险区，返回结构化校正结果。</div>';
   activateStep('scan');
 }
@@ -1707,7 +1707,7 @@ function generateSocket() {
     if (wireMesh) scene.remove(wireMesh);
     socketMesh = new THREE.Mesh(geometry, socketMaterial);
     socketMesh.renderOrder = 2;
-    socketMesh.name = 'AI初始接受腔';
+    socketMesh.name = 'AI 初始接受腔';
     wireMesh = new THREE.Mesh(geometry.clone(), wireMaterial);
     wireMesh.renderOrder = 3;
     wireMesh.visible = controls.wireToggle.checked;
@@ -1719,7 +1719,7 @@ function generateSocket() {
     updateMetrics(true);
     recordSocketVersion('算法生成');
     activateStep('edit');
-    hint.textContent = 'AI初版已生成。打开“局部减压画笔”后，在接受腔表面点击可添加局部外扩修形。';
+    hint.textContent = 'AI 初版已生成。打开“局部减压画笔”后，在接受腔表面点击可添加局部外扩修形。';
   }, 420);
 }
 
@@ -2330,12 +2330,12 @@ function updateRecommendations() {
     .join('、') || '当前无明显高曲率骨突';
   const baseCards = [
     ['整体包容量', `残肢最大围度约 ${Math.round(metrics.circumference * 1000)} mm，初始外扩 ${offset.toFixed(1)} mm，用于预留软组织形变与袜套空间。`, false],
-    ['语义标签驱动', `AI已识别 ${semanticMap?.labelCount || 0} 类残肢标签；${highLabels} 等高风险区会自动增加局部减压，后侧软组织区作为承重参考，不再对初版几何做向内收缩。`, true],
+    ['语义标签驱动', `AI 已识别 ${semanticMap?.labelCount || 0} 类残肢标签；${highLabels} 等高风险区会自动增加局部减压，后侧软组织区作为承重参考，不再对初版几何做向内收缩。`, true],
     ['患者画像系数', `${patient.activityLevel} 活动等级、${patient.bodyWeightKg} kg、${tissueLabel(patient.tissueFirmness)}软组织：稳定系数 ${patient.stabilityCoeff.toFixed(2)}，敏感区减压系数 ${patient.sensitivityCoeff.toFixed(2)}。`, false],
     ['体积守恒补偿', volume ? `承重区回收 ${volume.removedMm3} mm³，系统自动在减压区和近端边缘释放 ${volume.releasedMm3} mm³，避免局部收紧后整体过压。` : '生成后将计算承重区回收体积，并在减压区或边缘区进行补偿释放。', false],
     ['胫骨前缘减压', `识别为高压敏感区，基础减压 ${relief.toFixed(1)} mm，并叠加语义标签对应的局部调整量。`, true],
     ['末端包容', `远端区域增加 ${distal.toFixed(1)} mm 包容，减少末端集中承压，适合作为初版试穿前方案。`, false],
-    ['近端修边', `修边高度设置为残肢扫描高度的 ${trim}%；AI保留较高包覆以保证悬吊与稳定性。`, false]
+    ['近端修边', `修边高度设置为残肢扫描高度的 ${trim}%；AI 保留较高包覆以保证悬吊与稳定性。`, false]
   ].map(([title, body, warn]) => `<div class="rec ${warn ? 'warn' : ''}"><strong>${title}</strong>${body}</div>`).join('');
 
   const riskCards = currentRiskZones.map((zone) => (
@@ -2387,7 +2387,7 @@ async function refineWithGemini() {
     return;
   }
   if (!metrics) return;
-  setAiState('Gemini复核中');
+  setAiState('Gemini 复核中');
   geminiResult.innerHTML = '<span class="eyebrow">大模型复核</span><div class="empty">正在把当前参数、几何摘要和3D预览交给 Gemini 分析...</div>';
 
   const payload = {
@@ -2405,7 +2405,7 @@ async function refineWithGemini() {
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || 'Gemini request failed');
     applyGeminiRefinement(data.result, data.model);
-    setAiState('Gemini已复核');
+    setAiState('Gemini 已复核');
   } catch (error) {
     const fallback = localRefinementFallback();
     applyGeminiRefinement(fallback, '本地规则兜底');
@@ -2510,9 +2510,9 @@ function applyGeminiRefinement(result, modelName) {
   currentRiskZones = geminiRefinement.riskZones;
   updateOutputs();
   refreshSocketGeometry();
-  recordSocketVersion('Gemini复核');
+  recordSocketVersion('Gemini 复核');
   renderGeminiResult(modelName);
-  hint.textContent = 'Gemini复核完成：参数已保守校正，风险热图已按红/黄/绿等级重新标注。';
+  hint.textContent = 'Gemini 复核完成：参数已保守校正，风险热图已按红/黄/绿等级重新标注。';
 }
 
 function sanitizeRefinement(result) {
@@ -2695,7 +2695,7 @@ function togglePaintMode() {
   document.querySelector('#paintBtn').classList.toggle('active', paintMode);
   hint.textContent = paintMode
     ? '局部减压画笔已开启：点击接受腔表面，系统会在该处外扩并留下编辑标记。'
-    : '可拖拽旋转、滚轮缩放。点击“AI生成接受腔”后可用画笔在模型上添加局部减压。';
+    : '可拖拽旋转、滚轮缩放。点击“算法生成接受腔”后，可用画笔在模型上添加局部减压。';
 }
 
 function paintRelief(event) {
@@ -2822,6 +2822,22 @@ controls.wireToggle.addEventListener('change', () => {
 controls.semanticToggle.addEventListener('change', () => {
   applySemanticColorsToLimb(limbMesh, semanticMap);
   document.querySelector('#semanticBtn')?.classList.toggle('active', controls.semanticToggle.checked);
+});
+
+function setInspectorPane(paneId) {
+  document.querySelectorAll('.inspector-tab').forEach((tab) => {
+    const isActive = tab.dataset.pane === paneId;
+    tab.classList.toggle('active', isActive);
+    tab.setAttribute('aria-selected', String(isActive));
+  });
+  document.querySelectorAll('.inspector-pane').forEach((pane) => {
+    pane.classList.toggle('active', pane.dataset.pane === paneId);
+    pane.hidden = pane.dataset.pane !== paneId;
+  });
+}
+
+document.querySelectorAll('.inspector-tab').forEach((tab) => {
+  tab.addEventListener('click', () => setInspectorPane(tab.dataset.pane));
 });
 
 document.querySelector('#viewBoth').addEventListener('click', () => {
