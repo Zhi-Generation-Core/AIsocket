@@ -15,12 +15,29 @@ const versionDelta = document.querySelector('#versionDelta');
 const aiState = document.querySelector('#aiState');
 const hint = document.querySelector('#hint');
 const geminiResult = document.querySelector('#geminiResult');
+const currentStepTitle = document.querySelector('#currentStepTitle');
+const currentStepNote = document.querySelector('#currentStepNote');
+const workflowProgress = document.querySelector('#workflowProgress');
+const workflowNext = document.querySelector('#workflowNext');
+const versionTimeline = document.querySelector('#versionTimeline');
+const addVersionBtn = document.querySelector('#addVersionBtn');
+const deleteVersionBtn = document.querySelector('#deleteVersionBtn');
+const userName = document.querySelector('#userName');
+const userAvatar = document.querySelector('#userAvatar');
+const interactionFeedback = document.querySelector('#interactionFeedback');
+const sectionControls = document.querySelector('#sectionControls');
+const sectionHeight = document.querySelector('#sectionHeight');
+const sectionHeightOut = document.querySelector('#sectionHeightOut');
+const resetViewBtn = document.querySelector('#resetViewBtn');
+const fitViewBtn = document.querySelector('#fitViewBtn');
+const undoPaintBtn = document.querySelector('#undoPaintBtn');
 
 const controls = {
   offset: document.querySelector('#offset'),
   trim: document.querySelector('#trim'),
   relief: document.querySelector('#relief'),
   distal: document.querySelector('#distal'),
+  brushStrength: document.querySelector('#brushStrength'),
   activityLevel: document.querySelector('#activityLevel'),
   bodyWeight: document.querySelector('#bodyWeight'),
   tissueFirmness: document.querySelector('#tissueFirmness'),
@@ -34,6 +51,7 @@ const outputs = {
   trim: document.querySelector('#trimOut'),
   relief: document.querySelector('#reliefOut'),
   distal: document.querySelector('#distalOut'),
+  brushStrength: document.querySelector('#brushStrengthOut'),
   weight: document.querySelector('#weightOut'),
   height: document.querySelector('#heightMetric'),
   circ: document.querySelector('#circMetric'),
@@ -113,13 +131,73 @@ let currentRiskZones = [];
 let semanticMap = null;
 let currentGenerationMeta = null;
 let socketVersions = [];
+let selectedVersionId = null;
+let nextVersionNumber = 1;
 let geminiRefinement = null;
+let currentViewMode = 'both';
+let paintUndoStack = [];
+let completedWorkflowSteps = new Set();
 
-scene.add(heatGroup, markerGroup);
+const sectionPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
+const brushCursor = new THREE.Mesh(
+  new THREE.TorusGeometry(0.055, 0.0012, 8, 72),
+  new THREE.MeshBasicMaterial({
+    color: 0xd96d3a,
+    transparent: true,
+    opacity: 0.86,
+    depthWrite: false
+  })
+);
+brushCursor.visible = false;
+brushCursor.renderOrder = 5;
+
+scene.add(heatGroup, markerGroup, brushCursor);
 
 const PROFILE_SLICES = 72;
 const PROFILE_SEGMENTS = 128;
 const MIN_SECTION_RADIUS = 0.006;
+const WORKFLOW_STEPS = [
+  {
+    id: 'scan',
+    title: '导入扫描',
+    note: '导入 STL/OBJ 或使用示例残肢，建立设计起点。',
+    next: '下一步：识别解剖点与风险区。',
+    progress: 20,
+    pane: 'advice'
+  },
+  {
+    id: 'landmarks',
+    title: '识别解剖点',
+    note: '检查语义标签、敏感区和承重区，确认 AI 对残肢区域的理解。',
+    next: '下一步：生成 AI 初始参数建议。',
+    progress: 40,
+    pane: 'advice'
+  },
+  {
+    id: 'ai',
+    title: 'AI 参数建议',
+    note: '根据几何、活动等级和软组织状态生成接受腔初版。',
+    next: '下一步：进入参数与画笔精修。',
+    progress: 60,
+    pane: 'advice'
+  },
+  {
+    id: 'edit',
+    title: '手动精修',
+    note: '调整包容量、修边高度、减压幅度，或用画笔做局部外扩。',
+    next: '下一步：检查制造指标并导出。',
+    progress: 80,
+    pane: 'params'
+  },
+  {
+    id: 'export',
+    title: '制造输出',
+    note: '复核体积 Delta、壁厚和打印预检，导出接受腔 STL。',
+    next: '当前流程已到制造输出阶段。',
+    progress: 100,
+    pane: 'manufacture'
+  }
+];
 
 const SEMANTIC_LABELS = {
   anterior_tibia: {
@@ -1410,11 +1488,14 @@ function renderSemanticTags() {
   `;
 }
 
-function recordSocketVersion(source) {
+function recordSocketVersion(source, options = {}) {
+  if (!socketMesh) return null;
+  const previous = selectedVersion() || socketVersions.at(-1) || null;
   const snapshot = {
-    id: `V${socketVersions.length + 1}`,
+    id: `V${nextVersionNumber++}`,
     source,
     createdAt: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+    geometry: socketMesh.geometry.clone(),
     params: {
       offsetMm: Number(controls.offset.value),
       trimPercent: Number(controls.trim.value),
@@ -1423,9 +1504,12 @@ function recordSocketVersion(source) {
     },
     patient: patientContext(),
     semanticActions: currentGenerationMeta?.semanticActions || [],
-    volumeConservation: currentGenerationMeta?.volumeConservation || null
+    volumeConservation: currentGenerationMeta?.volumeConservation || null,
+    generationMeta: structuredCloneSafe(currentGenerationMeta),
+    geminiRefinement: structuredCloneSafe(geminiRefinement),
+    riskZones: structuredCloneSafe(currentRiskZones),
+    manual: Boolean(options.manual)
   };
-  const previous = socketVersions.at(-1);
   snapshot.delta = previous ? {
     offsetMm: snapshot.params.offsetMm - previous.params.offsetMm,
     trimPercent: snapshot.params.trimPercent - previous.params.trimPercent,
@@ -1434,14 +1518,40 @@ function recordSocketVersion(source) {
     volumeMm3: (snapshot.volumeConservation?.releasedMm3 || 0) - (previous.volumeConservation?.releasedMm3 || 0)
   } : null;
   socketVersions.push(snapshot);
-  if (socketVersions.length > 6) socketVersions = socketVersions.slice(-6);
+  while (socketVersions.length > 8) {
+    const removed = socketVersions.shift();
+    removed.geometry?.dispose?.();
+  }
+  selectedVersionId = snapshot.id;
   renderVersionDelta();
+  renderSidebarVersions();
   updateMetrics(true);
+  return snapshot;
+}
+
+function selectedVersion() {
+  return socketVersions.find((version) => version.id === selectedVersionId) || socketVersions.at(-1) || null;
+}
+
+function structuredCloneSafe(value) {
+  if (!value) return value;
+  try {
+    return structuredClone(value);
+  } catch (_error) {
+    return JSON.parse(JSON.stringify(value));
+  }
+}
+
+function disposeSocketVersions() {
+  socketVersions.forEach((version) => version.geometry?.dispose?.());
+  socketVersions = [];
+  selectedVersionId = null;
+  nextVersionNumber = 1;
 }
 
 function renderVersionDelta() {
   if (!versionDelta) return;
-  const latest = socketVersions.at(-1);
+  const latest = selectedVersion();
   if (!latest) {
     versionDelta.innerHTML = '<div class="empty">生成接受腔后，系统会记录版本参数与体积补偿 Delta。</div>';
     return;
@@ -1628,14 +1738,15 @@ function setLimb(mesh, profile = null) {
   if (socketMesh) scene.remove(socketMesh);
   if (wireMesh) scene.remove(wireMesh);
   heatGroup.clear();
-  markerGroup.clear();
+  clearPaintMarkers();
   socketMesh = null;
   wireMesh = null;
   currentRiskZones = [];
   semanticMap = null;
   currentGenerationMeta = null;
-  socketVersions = [];
+  disposeSocketVersions();
   geminiRefinement = null;
+  completedWorkflowSteps = new Set();
   limbMesh = mesh;
   scene.add(limbMesh);
   modelProfile = profile || profileFromGeometry(mesh);
@@ -1644,12 +1755,13 @@ function setLimb(mesh, profile = null) {
   applySemanticColorsToLimb(limbMesh, semanticMap);
   renderSemanticTags();
   renderVersionDelta();
+  renderSidebarVersions();
   metrics = calculateMetrics(modelProfile);
   updateMetrics(false);
   setAiState('待生成');
   recommendations.innerHTML = '<div class="empty">残肢模型已载入，AI 语义标签已生成。点击“算法生成接受腔”，系统会按不同标签自动匹配包容、减压和承重调整。</div>';
   geminiResult.innerHTML = '<span class="eyebrow">大模型复核</span><div class="empty">生成初版后，可调用 Gemini 分析参数、预览图和风险区，返回结构化校正结果。</div>';
-  activateStep('scan');
+  activateStep('landmarks', { complete: ['scan'] });
 }
 
 function applySmartDefaultTrim(profile) {
@@ -1699,7 +1811,7 @@ function generateSocket() {
   if (!modelProfile) loadSample();
   setAiState('分析中');
   activateStep('ai');
-  markerGroup.clear();
+  clearPaintMarkers();
 
   window.setTimeout(() => {
     const geometry = createSocketGeometry();
@@ -1713,12 +1825,14 @@ function generateSocket() {
     wireMesh.visible = controls.wireToggle.checked;
     scene.add(socketMesh, wireMesh);
     currentRiskZones = defaultRiskZones();
+    clearPaintUndoStack();
     buildHeatZones();
+    if (sectionMode) applySectionClipping();
     setAiState('已生成');
     updateRecommendations();
     updateMetrics(true);
     recordSocketVersion('算法生成');
-    activateStep('edit');
+    activateStep('ai', { complete: ['scan', 'landmarks'], uncomplete: ['ai', 'edit', 'export'] });
     hint.textContent = 'AI 初版已生成。打开“局部减压画笔”后，在接受腔表面点击可添加局部外扩修形。';
   }, 420);
 }
@@ -1728,11 +1842,14 @@ function refreshSocketGeometry() {
   const geometry = createSocketGeometry();
   socketMesh.geometry.dispose();
   socketMesh.geometry = geometry;
+  clearPaintUndoStack();
+  clearPaintMarkers();
   if (wireMesh) {
     wireMesh.geometry.dispose();
     wireMesh.geometry = geometry.clone();
   }
   buildHeatZones();
+  if (sectionMode) applySectionClipping();
   updateRecommendations();
   updateMetrics(true);
 }
@@ -2377,7 +2494,14 @@ function updateOutputs() {
   outputs.trim.textContent = `${controls.trim.value}%`;
   outputs.relief.textContent = `${Number(controls.relief.value).toFixed(1)} mm`;
   outputs.distal.textContent = `${Number(controls.distal.value).toFixed(1)} mm`;
+  if (outputs.brushStrength) outputs.brushStrength.textContent = `${brushStrengthMm().toFixed(1)} mm`;
   if (outputs.weight) outputs.weight.textContent = `${controls.bodyWeight?.value || 70} kg`;
+}
+
+function syncUserAvatar() {
+  if (!userName || !userAvatar) return;
+  const firstChar = Array.from(userName.textContent.trim()).find((char) => char.trim());
+  userAvatar.textContent = firstChar || '用';
 }
 
 async function refineWithGemini() {
@@ -2512,6 +2636,8 @@ function applyGeminiRefinement(result, modelName) {
   refreshSocketGeometry();
   recordSocketVersion('Gemini 复核');
   renderGeminiResult(modelName);
+  activateStep('edit', { complete: ['scan', 'landmarks', 'ai'], uncomplete: ['edit', 'export'] });
+  setInspectorPane('params');
   hint.textContent = 'Gemini 复核完成：参数已保守校正，风险热图已按红/黄/绿等级重新标注。';
 }
 
@@ -2616,16 +2742,130 @@ function setAiState(text) {
   aiState.textContent = text;
 }
 
-function activateStep(stepName) {
+function activateStep(stepName, options = {}) {
+  (options.complete || []).forEach((stepId) => completedWorkflowSteps.add(stepId));
+  (options.uncomplete || []).forEach((stepId) => completedWorkflowSteps.delete(stepId));
+  const activeIndex = Math.max(0, WORKFLOW_STEPS.findIndex((step) => step.id === stepName));
   document.querySelectorAll('.step').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.step === stepName);
+    btn.classList.toggle('done', completedWorkflowSteps.has(btn.dataset.step));
   });
+  const active = WORKFLOW_STEPS[activeIndex] || WORKFLOW_STEPS[0];
+  if (currentStepTitle) currentStepTitle.textContent = active.title;
+  if (currentStepNote) currentStepNote.textContent = active.note;
+  if (workflowProgress) workflowProgress.style.width = `${active.progress}%`;
+  if (workflowNext) workflowNext.textContent = active.next;
+}
+
+function renderSidebarVersions() {
+  if (!versionTimeline) return;
+  if (!socketVersions.length) {
+    versionTimeline.innerHTML = '<div class="timeline-empty">生成接受腔后，这里会记录真实版本。</div>';
+    if (deleteVersionBtn) deleteVersionBtn.disabled = true;
+    return;
+  }
+  if (!selectedVersionId || !socketVersions.some((version) => version.id === selectedVersionId)) {
+    selectedVersionId = socketVersions.at(-1).id;
+  }
+  versionTimeline.innerHTML = socketVersions
+    .slice()
+    .reverse()
+    .map((version, index) => {
+      const delta = version.delta ? `Delta ${signed(version.delta.offsetMm)} mm` : '初始版本';
+      const active = version.id === selectedVersionId;
+      return `
+        <button class="version ${active ? 'active' : ''}" type="button" data-version-id="${version.id}">
+          <strong>${version.id} ${escapeHtml(version.source)}</strong>
+          <small>${version.createdAt} · ${delta}</small>
+        </button>
+      `;
+    })
+    .join('');
+  if (deleteVersionBtn) deleteVersionBtn.disabled = socketVersions.length === 0;
+}
+
+function applyVersionParams(version) {
+  if (!version?.params) return;
+  controls.offset.value = String(version.params.offsetMm);
+  controls.trim.value = String(version.params.trimPercent);
+  controls.relief.value = String(version.params.reliefMm);
+  controls.distal.value = String(version.params.distalMm);
+  updateOutputs();
+}
+
+function restoreSocketVersion(versionId) {
+  const version = socketVersions.find((item) => item.id === versionId);
+  if (!version?.geometry || !socketMesh) return;
+  selectedVersionId = version.id;
+  socketMesh.geometry.dispose();
+  socketMesh.geometry = version.geometry.clone();
+  if (wireMesh) {
+    wireMesh.geometry.dispose();
+    wireMesh.geometry = socketMesh.geometry.clone();
+  }
+  applyVersionParams(version);
+  currentGenerationMeta = structuredCloneSafe(version.generationMeta) || {
+    volumeConservation: version.volumeConservation,
+    semanticActions: version.semanticActions
+  };
+  geminiRefinement = structuredCloneSafe(version.geminiRefinement);
+  currentRiskZones = structuredCloneSafe(version.riskZones) || [];
+  clearPaintUndoStack();
+  clearPaintMarkers();
+  buildHeatZones();
+  if (sectionMode) applySectionClipping();
+  renderVersionDelta();
+  renderSidebarVersions();
+  updateRecommendations();
+  updateMetrics(true);
+  hint.textContent = `已切换到 ${version.id} · ${version.source}。`;
+}
+
+function addManualVersion() {
+  if (!socketMesh) {
+    hint.textContent = '请先生成接受腔，再手动新增版本。';
+    return;
+  }
+  recordSocketVersion('手动新增', { manual: true });
+  activateStep('edit', { complete: ['scan', 'landmarks'] });
+  setInspectorPane('params');
+  hint.textContent = `已基于上一版新增 ${selectedVersionId}，可继续调整参数或画笔。`;
+}
+
+function deleteSelectedVersion() {
+  const version = selectedVersion();
+  if (!version) return;
+  const index = socketVersions.findIndex((item) => item.id === version.id);
+  if (index < 0) return;
+  const [removed] = socketVersions.splice(index, 1);
+  removed.geometry?.dispose?.();
+  selectedVersionId = socketVersions[Math.max(0, index - 1)]?.id || socketVersions.at(-1)?.id || null;
+  if (selectedVersionId) {
+    restoreSocketVersion(selectedVersionId);
+  } else {
+    if (socketMesh) {
+      scene.remove(socketMesh);
+      socketMesh.geometry.dispose();
+      socketMesh = null;
+    }
+    if (wireMesh) {
+      scene.remove(wireMesh);
+      wireMesh.geometry.dispose();
+      wireMesh = null;
+    }
+    currentGenerationMeta = null;
+    renderVersionDelta();
+    renderSidebarVersions();
+    updateMetrics(false);
+    activateStep('landmarks', { complete: ['scan'], uncomplete: ['landmarks', 'ai', 'edit', 'export'] });
+  }
+  hint.textContent = `已删除 ${removed.id}。`;
 }
 
 async function importModel(file) {
   fileInput.disabled = true;
   hint.textContent = `正在导入 ${file.name}...`;
-  activateStep('scan');
+  activateStep('scan', { uncomplete: ['scan', 'landmarks', 'ai', 'edit', 'export'] });
   await new Promise((resolve) => requestAnimationFrame(resolve));
   try {
     const ext = file.name.split('.').pop().toLowerCase();
@@ -2661,6 +2901,7 @@ async function importModel(file) {
 }
 
 function setVisibility(mode) {
+  currentViewMode = mode;
   if (limbMesh) limbMesh.visible = mode !== 'socket';
   if (socketMesh) socketMesh.visible = mode !== 'limb';
   if (wireMesh) wireMesh.visible = mode !== 'limb' && controls.wireToggle.checked;
@@ -2672,34 +2913,69 @@ function setVisibility(mode) {
   socketMaterial.opacity = mode === 'both' ? 0.82 : 0.72;
   socketMaterial.depthWrite = false;
   socketMaterial.needsUpdate = true;
+  if (mode === 'limb') brushCursor.visible = false;
 }
 
 function setToolButton(id) {
-  document.querySelectorAll('.viewer-toolbar .tool').forEach((btn) => btn.classList.remove('active'));
+  document.querySelectorAll('#viewBoth, #viewSocket, #viewLimb').forEach((btn) => btn.classList.remove('active'));
   document.querySelector(id).classList.add('active');
+}
+
+function updateSectionPlane() {
+  const source = socketMesh || limbMesh;
+  if (!source) return;
+  const box = new THREE.Box3().setFromObject(source);
+  const ratio = clamp(Number(sectionHeight?.value || 50) / 100, 0, 1);
+  const y = THREE.MathUtils.lerp(box.min.y, box.max.y, ratio);
+  sectionPlane.constant = y;
+  if (sectionHeightOut) sectionHeightOut.textContent = `${Math.round(ratio * 100)}%`;
+}
+
+function applySectionClipping() {
+  updateSectionPlane();
+  renderer.localClippingEnabled = sectionMode;
+  [limbMaterial, socketMaterial, wireMaterial, heatMaterial].forEach((mat) => {
+    mat.clippingPlanes = sectionMode ? [sectionPlane] : [];
+    mat.needsUpdate = true;
+  });
 }
 
 function applySectionMode() {
   sectionMode = !sectionMode;
-  const plane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0.018);
-  renderer.localClippingEnabled = sectionMode;
-  [limbMaterial, socketMaterial, wireMaterial, heatMaterial].forEach((mat) => {
-    mat.clippingPlanes = sectionMode ? [plane] : [];
-    mat.needsUpdate = true;
-  });
+  if (sectionControls) sectionControls.hidden = !sectionMode;
+  applySectionClipping();
   document.querySelector('#sectionBtn').classList.toggle('active', sectionMode);
+  hint.textContent = sectionMode
+    ? '剖切预览已开启：拖动高度滑条查看接受腔与残肢的截面关系。'
+    : '剖切预览已关闭。';
 }
 
 function togglePaintMode() {
   paintMode = !paintMode;
   document.querySelector('#paintBtn').classList.toggle('active', paintMode);
+  viewer.classList.toggle('painting', paintMode);
+  brushCursor.visible = false;
   hint.textContent = paintMode
-    ? '局部减压画笔已开启：点击接受腔表面，系统会在该处外扩并留下编辑标记。'
+    ? '局部减压画笔已开启：移动到接受腔表面可预览画笔半径，点击后添加局部外扩修形。'
     : '可拖拽旋转、滚轮缩放。点击“算法生成接受腔”后，可用画笔在模型上添加局部减压。';
 }
 
-function paintRelief(event) {
-  if (!paintMode || !socketMesh) return;
+function brushStrengthMm() {
+  return Number(controls.brushStrength?.value || 1.5);
+}
+
+function brushRadiusMeters() {
+  return 0.025 + brushStrengthMm() * 0.02;
+}
+
+function updateBrushCursorGeometry() {
+  const radius = brushRadiusMeters();
+  brushCursor.geometry.dispose();
+  brushCursor.geometry = new THREE.TorusGeometry(radius, Math.max(0.0008, radius * 0.022), 8, 72);
+}
+
+function pointerToSocketHit(event) {
+  if (!socketMesh) return null;
   const rect = renderer.domElement.getBoundingClientRect();
   const mouse = new THREE.Vector2(
     ((event.clientX - rect.left) / rect.width) * 2 - 1,
@@ -2707,19 +2983,94 @@ function paintRelief(event) {
   );
   const raycaster = new THREE.Raycaster();
   raycaster.setFromCamera(mouse, camera);
-  const hit = raycaster.intersectObject(socketMesh)[0];
+  return raycaster.intersectObject(socketMesh)[0] || null;
+}
+
+function updateBrushCursor(event) {
+  if (!paintMode || !socketMesh || currentViewMode === 'limb') {
+    brushCursor.visible = false;
+    return;
+  }
+  const hit = pointerToSocketHit(event);
+  if (!hit) {
+    brushCursor.visible = false;
+    return;
+  }
+  const normal = hit.face?.normal
+    ? hit.face.normal.clone().transformDirection(socketMesh.matrixWorld).normalize()
+    : camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(-1).normalize();
+  brushCursor.position.copy(hit.point).addScaledVector(normal, 0.002);
+  brushCursor.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+  brushCursor.visible = true;
+}
+
+function clearPaintMarkers() {
+  markerGroup.children.forEach((marker) => {
+    marker.geometry?.dispose?.();
+  });
+  markerGroup.clear();
+}
+
+function clearPaintUndoStack() {
+  paintUndoStack.forEach((item) => item.geometry.dispose());
+  paintUndoStack = [];
+  if (undoPaintBtn) undoPaintBtn.disabled = true;
+}
+
+function pushPaintUndoSnapshot() {
+  if (!socketMesh) return null;
+  const snapshot = {
+    geometry: socketMesh.geometry.clone(),
+    marker: null
+  };
+  paintUndoStack.push(snapshot);
+  if (paintUndoStack.length > 12) {
+    const dropped = paintUndoStack.shift();
+    dropped.geometry.dispose();
+  }
+  if (undoPaintBtn) undoPaintBtn.disabled = paintUndoStack.length === 0;
+  return snapshot;
+}
+
+function undoPaintStep() {
+  const snapshot = paintUndoStack.pop();
+  if (!snapshot || !socketMesh) return;
+  socketMesh.geometry.dispose();
+  socketMesh.geometry = snapshot.geometry;
+  if (snapshot.marker) {
+    markerGroup.remove(snapshot.marker);
+    snapshot.marker.geometry.dispose();
+  }
+  if (wireMesh) {
+    wireMesh.geometry.dispose();
+    wireMesh.geometry = socketMesh.geometry.clone();
+  }
+  if (undoPaintBtn) undoPaintBtn.disabled = paintUndoStack.length === 0;
+  updateMetrics(true);
+  if (interactionFeedback) {
+    interactionFeedback.textContent = '已撤销上一步局部减压编辑。';
+    interactionFeedback.classList.add('active');
+  }
+  hint.textContent = '已撤销上一步局部减压编辑。';
+}
+
+function paintRelief(event) {
+  if (!paintMode || !socketMesh || currentViewMode === 'limb') return;
+  const hit = pointerToSocketHit(event);
   if (!hit) return;
 
+  const undoSnapshot = pushPaintUndoSnapshot();
   const pos = socketMesh.geometry.attributes.position;
   const center = hit.point.clone();
-  const radius = 0.055;
+  const radius = brushRadiusMeters();
+  const displacement = brushStrengthMm() / 1000;
   for (let i = 0; i < pos.count; i += 1) {
     const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
     const d = v.distanceTo(center);
     if (d < radius) {
       const falloff = (1 + Math.cos((d / radius) * Math.PI)) / 2;
       const outward = new THREE.Vector3(v.x, 0, v.z).normalize();
-      v.addScaledVector(outward, 0.008 * falloff);
+      v.addScaledVector(outward, displacement * falloff);
       pos.setXYZ(i, v.x, v.y, v.z);
     }
   }
@@ -2732,7 +3083,43 @@ function paintRelief(event) {
   const marker = new THREE.Mesh(new THREE.SphereGeometry(0.009, 16, 12), heatMaterial);
   marker.position.copy(center);
   markerGroup.add(marker);
-  activateStep('edit');
+  if (undoSnapshot) undoSnapshot.marker = marker;
+  updateMetrics(true);
+  if (interactionFeedback) {
+    interactionFeedback.textContent = `本次局部减压 +${brushStrengthMm().toFixed(1)} mm，影响半径约 ${Math.round(radius * 1000)} mm。`;
+    interactionFeedback.classList.add('active');
+  }
+  setInspectorPane('params');
+  updateBrushCursor(event);
+  activateStep('edit', { complete: ['scan', 'landmarks'] });
+}
+
+function resetView() {
+  camera.position.set(0.52, 0.38, 0.78);
+  orbit.target.set(0, 0.18, 0);
+  camera.near = 0.01;
+  camera.far = 100;
+  camera.updateProjectionMatrix();
+  orbit.update();
+  hint.textContent = '视角已重置。';
+}
+
+function fitViewToModel() {
+  const objects = [limbMesh, socketMesh].filter(Boolean);
+  if (!objects.length) return;
+  const box = new THREE.Box3();
+  objects.forEach((object) => box.expandByObject(object));
+  if (box.isEmpty()) return;
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const direction = camera.position.clone().sub(orbit.target).normalize();
+  const distance = Math.max(0.18, sphere.radius / Math.sin(THREE.MathUtils.degToRad(camera.fov) / 2) * 1.18);
+  orbit.target.copy(sphere.center);
+  camera.position.copy(sphere.center).addScaledVector(direction.lengthSq() ? direction : new THREE.Vector3(0.55, 0.42, 0.78).normalize(), distance);
+  camera.near = Math.max(0.001, distance / 100);
+  camera.far = Math.max(10, distance * 100);
+  camera.updateProjectionMatrix();
+  orbit.update();
+  hint.textContent = '模型已适配到视图中央。';
 }
 
 function geometryToStl(mesh) {
@@ -2764,6 +3151,7 @@ fileInput.addEventListener('change', (event) => {
 sampleBtn.addEventListener('click', loadSample);
 generateBtn.addEventListener('click', generateSocket);
 geminiBtn.addEventListener('click', refineWithGemini);
+userName?.addEventListener('input', syncUserAvatar);
 exportBtn.addEventListener('click', async () => {
   if (!socketMesh) generateSocket();
   if (!socketMesh) return;
@@ -2780,8 +3168,22 @@ exportBtn.addEventListener('click', async () => {
     link.click();
     URL.revokeObjectURL(url);
   }
-  activateStep('export');
+  activateStep('export', { complete: ['scan', 'landmarks', 'ai', 'edit', 'export'] });
+  setInspectorPane('manufacture');
   outputs.print.textContent = '已导出';
+});
+
+resetViewBtn?.addEventListener('click', resetView);
+fitViewBtn?.addEventListener('click', fitViewToModel);
+undoPaintBtn?.addEventListener('click', undoPaintStep);
+addVersionBtn?.addEventListener('click', addManualVersion);
+deleteVersionBtn?.addEventListener('click', deleteSelectedVersion);
+sectionHeight?.addEventListener('input', () => {
+  applySectionClipping();
+});
+controls.brushStrength?.addEventListener('input', () => {
+  updateOutputs();
+  updateBrushCursorGeometry();
 });
 
 ['offset', 'trim', 'relief', 'distal'].forEach((key) => {
@@ -2840,6 +3242,23 @@ document.querySelectorAll('.inspector-tab').forEach((tab) => {
   tab.addEventListener('click', () => setInspectorPane(tab.dataset.pane));
 });
 
+document.querySelectorAll('.step').forEach((stepButton) => {
+  stepButton.addEventListener('click', () => {
+    const step = WORKFLOW_STEPS.find((item) => item.id === stepButton.dataset.step);
+    if (!step) return;
+    activateStep(step.id);
+    setInspectorPane(step.pane);
+  });
+});
+
+versionTimeline?.addEventListener('click', (event) => {
+  const button = event.target.closest('.version');
+  if (!button) return;
+  restoreSocketVersion(button.dataset.versionId);
+  activateStep('export', { complete: ['scan', 'landmarks', 'ai', 'edit', 'export'] });
+  setInspectorPane('manufacture');
+});
+
 document.querySelector('#viewBoth').addEventListener('click', () => {
   setToolButton('#viewBoth');
   setVisibility('both');
@@ -2859,9 +3278,16 @@ document.querySelector('#semanticBtn').addEventListener('click', () => {
 });
 document.querySelector('#sectionBtn').addEventListener('click', applySectionMode);
 document.querySelector('#paintBtn').addEventListener('click', togglePaintMode);
+renderer.domElement.addEventListener('pointermove', updateBrushCursor);
+renderer.domElement.addEventListener('pointerleave', () => {
+  brushCursor.visible = false;
+});
 renderer.domElement.addEventListener('click', paintRelief);
 
 updateOutputs();
+updateBrushCursorGeometry();
+syncUserAvatar();
+renderSidebarVersions();
 resize();
 loadSample();
 animate();

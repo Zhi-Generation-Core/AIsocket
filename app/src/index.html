@@ -9,11 +9,11 @@
   <body>
     <div class="app-shell">
       <aside class="sidebar">
-        <div class="brand">
-          <div class="mark">AI</div>
+        <div class="brand user-profile">
+          <div id="userAvatar" class="mark user-avatar">李</div>
           <div>
-            <h1>接受腔 AI 设计台</h1>
-            <p>临床引导式原型</p>
+            <h1 id="userName" contenteditable="true" spellcheck="false">李医生</h1>
+            <p contenteditable="true" spellcheck="false">ID: CLN-2048</p>
           </div>
         </div>
 
@@ -23,29 +23,55 @@
           <small contenteditable="true" spellcheck="false">K3 活动等级 · 初次建模</small>
         </div>
 
+        <section class="workflow-card" aria-live="polite">
+          <span class="eyebrow">当前阶段</span>
+          <strong id="currentStepTitle">导入扫描</strong>
+          <p id="currentStepNote">导入 STL/OBJ 或使用示例残肢，建立设计起点。</p>
+          <div class="workflow-progress" aria-hidden="true">
+            <span id="workflowProgress" style="width: 20%"></span>
+          </div>
+          <div id="workflowNext" class="workflow-next">下一步：识别解剖点与风险区。</div>
+        </section>
+
         <nav class="steps" aria-label="流程导航">
-          <button class="step active" data-step="scan"><span>1</span>导入扫描</button>
-          <button class="step" data-step="landmarks"><span>2</span>识别解剖点</button>
-          <button class="step" data-step="ai"><span>3</span>AI 参数建议</button>
-          <button class="step" data-step="edit"><span>4</span>手动精修</button>
-          <button class="step" data-step="export"><span>5</span>制造输出</button>
+          <button class="step active" data-step="scan">
+            <span class="step-index">1</span>
+            <span class="step-copy"><strong>导入扫描</strong><small>载入残肢模型</small></span>
+          </button>
+          <button class="step" data-step="landmarks">
+            <span class="step-index">2</span>
+            <span class="step-copy"><strong>识别解剖点</strong><small>查看语义标签</small></span>
+          </button>
+          <button class="step" data-step="ai">
+            <span class="step-index">3</span>
+            <span class="step-copy"><strong>AI 参数建议</strong><small>生成初始方案</small></span>
+          </button>
+          <button class="step" data-step="edit">
+            <span class="step-index">4</span>
+            <span class="step-copy"><strong>手动精修</strong><small>调整参数和画笔</small></span>
+          </button>
+          <button class="step" data-step="export">
+            <span class="step-index">5</span>
+            <span class="step-copy"><strong>制造输出</strong><small>检查并导出 STL</small></span>
+          </button>
         </nav>
 
         <div class="version-panel">
-          <span class="eyebrow">版本时间线</span>
-          <div class="timeline">
-            <button class="version active">V1 AI 初版</button>
-            <button class="version">V2 试穿修正</button>
-            <button class="version">V3 复诊优化</button>
+          <div class="version-head">
+            <span class="eyebrow">版本时间线</span>
+            <div class="version-actions">
+              <button id="addVersionBtn" class="mini-button" type="button">新增</button>
+              <button id="deleteVersionBtn" class="mini-button danger" type="button" disabled>删除</button>
+            </div>
+          </div>
+          <div id="versionTimeline" class="timeline">
+            <div class="timeline-empty">生成接受腔后，这里会记录真实版本。</div>
           </div>
         </div>
       </aside>
 
       <main class="workspace">
         <header class="topbar">
-          <div>
-            <h2>导入残肢模型，生成可解释的初始接受腔</h2>
-          </div>
           <div class="top-actions">
             <label class="ghost-button">
               <input id="fileInput" type="file" accept=".stl,.obj" />
@@ -60,12 +86,19 @@
         <section class="stage">
           <div id="viewer" class="viewer"></div>
           <div class="viewer-toolbar" aria-label="模型显示控制">
-            <button id="viewBoth" class="tool active">残肢 + 接受腔</button>
-            <button id="viewSocket" class="tool">仅接受腔</button>
-            <button id="viewLimb" class="tool">仅残肢</button>
-            <button id="semanticBtn" class="tool active">语义标签</button>
-            <button id="sectionBtn" class="tool">剖切预览</button>
-            <button id="paintBtn" class="tool">局部减压画笔</button>
+            <button id="viewBoth" class="tool icon-tool active" type="button" aria-label="显示残肢和接受腔" title="显示残肢和接受腔" data-tooltip="残肢 + 接受腔"><span aria-hidden="true">◐</span></button>
+            <button id="viewSocket" class="tool icon-tool" type="button" aria-label="仅显示接受腔" title="仅显示接受腔" data-tooltip="仅接受腔"><span aria-hidden="true">◯</span></button>
+            <button id="viewLimb" class="tool icon-tool" type="button" aria-label="仅显示残肢" title="仅显示残肢" data-tooltip="仅残肢"><span aria-hidden="true">●</span></button>
+            <button id="semanticBtn" class="tool icon-tool active" type="button" aria-label="切换语义标签" title="切换语义标签" data-tooltip="语义标签"><span aria-hidden="true">⌘</span></button>
+            <button id="sectionBtn" class="tool icon-tool" type="button" aria-label="切换剖切预览" title="切换剖切预览" data-tooltip="剖切预览"><span aria-hidden="true">◫</span></button>
+            <button id="paintBtn" class="tool icon-tool" type="button" aria-label="切换局部减压画笔" title="切换局部减压画笔" data-tooltip="局部减压画笔"><span aria-hidden="true">✎</span></button>
+            <button id="resetViewBtn" class="tool icon-tool" type="button" aria-label="重置视角" title="重置视角" data-tooltip="重置视角"><span aria-hidden="true">↺</span></button>
+            <button id="fitViewBtn" class="tool icon-tool" type="button" aria-label="适配模型" title="适配模型" data-tooltip="适配模型"><span aria-hidden="true">⌖</span></button>
+            <button id="undoPaintBtn" class="tool icon-tool" type="button" aria-label="撤销上一步" title="撤销上一步" data-tooltip="撤销上一步" disabled><span aria-hidden="true">↶</span></button>
+          </div>
+          <div id="sectionControls" class="section-controls" hidden>
+            <label for="sectionHeight">剖切高度 <output id="sectionHeightOut">50%</output></label>
+            <input id="sectionHeight" type="range" min="0" max="100" step="1" value="50" />
           </div>
           <div id="hint" class="hint">可拖拽旋转、滚轮缩放。点击“算法生成接受腔”后，可用画笔在模型上添加局部减压。</div>
         </section>
@@ -111,6 +144,7 @@
                 <div class="empty">生成初版后，可调用 Gemini 分析参数和预览图，返回结构化校正结果。</div>
               </div>
             </section>
+
           </div>
 
           <div id="paneParams" class="inspector-pane" role="tabpanel" aria-labelledby="tabParams" data-pane="params" hidden>
@@ -174,6 +208,16 @@
                 <label><input id="semanticToggle" type="checkbox" checked /> 语义标签</label>
                 <label><input id="wireToggle" type="checkbox" checked /> 网格线</label>
               </div>
+            </section>
+
+            <section class="panel compact">
+              <div class="panel-head">
+                <div>
+                  <span class="eyebrow">交互反馈</span>
+                  <h3>最近一次操作</h3>
+                </div>
+              </div>
+              <div id="interactionFeedback" class="interaction-feedback empty">开启画笔并点击接受腔表面后，这里会显示本次局部减压幅度。</div>
             </section>
           </div>
 
