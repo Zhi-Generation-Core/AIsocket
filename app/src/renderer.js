@@ -2,6 +2,12 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import {
+  estimateSocketSensePressure,
+  fitOpenLimbPrior,
+  pressureReliefAt,
+  pressureZonesForHeatmap
+} from './hybrid-optimizer.js?v=hybrid-b-20260609';
 
 const viewer = document.querySelector('#viewer');
 const fileInput = document.querySelector('#fileInput');
@@ -31,6 +37,9 @@ const sectionHeightOut = document.querySelector('#sectionHeightOut');
 const resetViewBtn = document.querySelector('#resetViewBtn');
 const fitViewBtn = document.querySelector('#fitViewBtn');
 const undoPaintBtn = document.querySelector('#undoPaintBtn');
+const pressureOptimizeBtn = document.querySelector('#pressureOptimizeBtn');
+const hybridState = document.querySelector('#hybridState');
+const hybridSummary = document.querySelector('#hybridSummary');
 
 const controls = {
   offset: document.querySelector('#offset'),
@@ -38,9 +47,6 @@ const controls = {
   relief: document.querySelector('#relief'),
   distal: document.querySelector('#distal'),
   brushStrength: document.querySelector('#brushStrength'),
-  activityLevel: document.querySelector('#activityLevel'),
-  bodyWeight: document.querySelector('#bodyWeight'),
-  tissueFirmness: document.querySelector('#tissueFirmness'),
   semanticToggle: document.querySelector('#semanticToggle'),
   heatToggle: document.querySelector('#heatToggle') || { checked: false, addEventListener: () => {} },
   wireToggle: document.querySelector('#wireToggle')
@@ -52,7 +58,6 @@ const outputs = {
   relief: document.querySelector('#reliefOut'),
   distal: document.querySelector('#distalOut'),
   brushStrength: document.querySelector('#brushStrengthOut'),
-  weight: document.querySelector('#weightOut'),
   height: document.querySelector('#heightMetric'),
   circ: document.querySelector('#circMetric'),
   volume: document.querySelector('#volumeMetric'),
@@ -137,6 +142,8 @@ let geminiRefinement = null;
 let currentViewMode = 'both';
 let paintUndoStack = [];
 let completedWorkflowSteps = new Set();
+let anatomyPrior = null;
+let pressureFeedback = null;
 
 const sectionPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
 const brushCursor = new THREE.Mesh(
@@ -1392,9 +1399,9 @@ function semanticActionEstimate(labelId) {
 }
 
 function patientContext() {
-  const activityLevel = controls.activityLevel?.value || 'K3';
-  const bodyWeightKg = Number(controls.bodyWeight?.value || 70);
-  const tissueFirmness = controls.tissueFirmness?.value || 'balanced';
+  const activityLevel = 'K3';
+  const bodyWeightKg = 70;
+  const tissueFirmness = 'balanced';
   const weightLoad = clamp((bodyWeightKg - 65) / 45, -0.35, 0.9);
   const activityMap = {
     K2: { stability: 0.82, containment: 0.2, proximal: 0.88 },
@@ -1507,6 +1514,8 @@ function recordSocketVersion(source, options = {}) {
     volumeConservation: currentGenerationMeta?.volumeConservation || null,
     generationMeta: structuredCloneSafe(currentGenerationMeta),
     geminiRefinement: structuredCloneSafe(geminiRefinement),
+    anatomyPrior: structuredCloneSafe(anatomyPrior),
+    pressureFeedback: structuredCloneSafe(pressureFeedback),
     riskZones: structuredCloneSafe(currentRiskZones),
     manual: Boolean(options.manual)
   };
@@ -1746,17 +1755,21 @@ function setLimb(mesh, profile = null) {
   currentGenerationMeta = null;
   disposeSocketVersions();
   geminiRefinement = null;
+  anatomyPrior = null;
+  pressureFeedback = null;
   completedWorkflowSteps = new Set();
   limbMesh = mesh;
   scene.add(limbMesh);
   modelProfile = profile || profileFromGeometry(mesh);
   semanticMap = buildSemanticMap(modelProfile, limbMesh);
+  anatomyPrior = fitOpenLimbPrior(modelProfile, semanticMap, patientContext());
   applySmartDefaultTrim(modelProfile);
   applySemanticColorsToLimb(limbMesh, semanticMap);
   renderSemanticTags();
   renderVersionDelta();
   renderSidebarVersions();
   metrics = calculateMetrics(modelProfile);
+  renderHybridSummary();
   updateMetrics(false);
   setAiState('待生成');
   recommendations.innerHTML = '<div class="empty">残肢模型已载入，AI 语义标签已生成。点击“算法生成接受腔”，系统会按不同标签自动匹配包容、减压和承重调整。</div>';
@@ -1812,6 +1825,7 @@ function generateSocket() {
   setAiState('分析中');
   activateStep('ai');
   clearPaintMarkers();
+  pressureFeedback = null;
 
   window.setTimeout(() => {
     const geometry = createSocketGeometry();
@@ -1824,7 +1838,8 @@ function generateSocket() {
     wireMesh.renderOrder = 3;
     wireMesh.visible = controls.wireToggle.checked;
     scene.add(socketMesh, wireMesh);
-    currentRiskZones = defaultRiskZones();
+    pressureFeedback = estimateCurrentPressure(0);
+    currentRiskZones = pressureZonesForHeatmap(pressureFeedback, semanticLabelNames());
     clearPaintUndoStack();
     buildHeatZones();
     if (sectionMode) applySectionClipping();
@@ -1832,6 +1847,7 @@ function generateSocket() {
     updateRecommendations();
     updateMetrics(true);
     recordSocketVersion('算法生成');
+    renderHybridSummary();
     activateStep('ai', { complete: ['scan', 'landmarks'], uncomplete: ['ai', 'edit', 'export'] });
     hint.textContent = 'AI 初版已生成。打开“局部减压画笔”后，在接受腔表面点击可添加局部外扩修形。';
   }, 420);
@@ -1886,6 +1902,9 @@ function createSocketGeometry() {
       const labelId = semanticLabelAt(sectionIndex, Math.round((index / sourceRadii.length) * PROFILE_SEGMENTS));
       const semanticRule = semanticSocketGeometryDeformation(labelId, t, theta);
       const semanticBias = Math.max(0, semanticRule.meters);
+      const pressureBias = pressureReliefAt(pressureFeedback, t, theta);
+      const rawClearance = offset + brimClearance + distalCup + anteriorRelief + medialLateralEase + semanticBias + pressureBias;
+      const clearance = Math.min(rawClearance, socketClearanceLimit(labelId, t, offset));
       const releaseWeight = volumeReleaseWeight(labelId, t, semanticRule);
       if (semanticBias < 0) removedVolume += Math.max(0, -r * semanticBias * angleStep * sectionStep);
       if (releaseWeight > 0) releaseDenominator += Math.max(MIN_SECTION_RADIUS, r) * angleStep * sectionStep * releaseWeight;
@@ -1895,7 +1914,7 @@ function createSocketGeometry() {
         labelId,
         releaseWeight,
         ruleWeight: semanticRule.weight,
-        baseRadius: r + offset + brimClearance + distalCup + anteriorRelief + medialLateralEase + semanticBias
+        baseRadius: r + clearance
       };
     });
     return {
@@ -1937,9 +1956,21 @@ function createSocketGeometry() {
       requestedPercent: Math.round(requestedTrim * 100),
       appliedPercent: Math.round(trim * 100)
     },
-    semanticActions: summarizeSemanticActions()
+    semanticActions: summarizeSemanticActions(),
+    anatomyPrior: structuredCloneSafe(anatomyPrior),
+    pressureFeedback: structuredCloneSafe(pressureFeedback)
   };
   return createSectionedGeometry(profile, PROFILE_SEGMENTS, { closeDistal: true });
+}
+
+function socketClearanceLimit(labelId, t, offsetMeters) {
+  const offsetMm = offsetMeters * 1000;
+  if (labelId === 'distal_end') return (Math.max(offsetMm + 5.5, 11.5) / 1000);
+  if (labelId === 'anterior_tibia' || labelId === 'fibula_head') return (Math.max(offsetMm + 4.5, 9.5) / 1000);
+  if (labelId === 'proximal_brim') return (Math.max(offsetMm + 2.2, 6.5) / 1000);
+  if (labelId === 'posterior_soft_tissue') return (Math.max(offsetMm + 1.2, 5.2) / 1000);
+  const distalBlend = Math.max(0, 1 - t / 0.22) * 2.0;
+  return (Math.max(offsetMm + 2.0 + distalBlend, 6.5) / 1000);
 }
 
 function effectiveSocketTrimRatio(profile, requestedTrim) {
@@ -2275,6 +2306,78 @@ function summarizeSemanticActions() {
   });
 }
 
+function semanticLabelNames() {
+  return Object.fromEntries(Object.entries(SEMANTIC_LABELS).map(([id, value]) => [id, value.label]));
+}
+
+function estimateCurrentPressure(iteration = pressureFeedback?.iteration || 0) {
+  if (!semanticMap || !anatomyPrior) return null;
+  const previous = pressureFeedback;
+  const result = estimateSocketSensePressure({
+    semanticMap,
+    anatomyPrior,
+    patient: patientContext(),
+    params: {
+      offsetMm: Number(controls.offset.value),
+      reliefMm: Number(controls.relief.value),
+      distalMm: Number(controls.distal.value),
+      trimPercent: Number(controls.trim.value)
+    },
+    iteration
+  });
+  if (result) {
+    result.applied = iteration > 0;
+    result.baselinePeakKpa = previous?.baselinePeakKpa ?? previous?.peakKpa ?? result.peakKpa;
+    result.baselineHighCount = previous?.baselineHighCount ?? previous?.highCount ?? result.highCount;
+  }
+  return result;
+}
+
+function renderHybridSummary() {
+  if (!hybridSummary || !hybridState) return;
+  if (!anatomyPrior) {
+    hybridState.textContent = '待拟合';
+    hybridSummary.innerHTML = '<div class="empty">导入残肢后，系统将拟合统计解剖先验。</div>';
+    if (pressureOptimizeBtn) pressureOptimizeBtn.disabled = true;
+    return;
+  }
+
+  const thinLandmarks = anatomyPrior.landmarks
+    .filter((item) => ['anterior_tibia', 'fibula_head', 'distal_end'].includes(item.id))
+    .sort((a, b) => a.thicknessMm - b.thicknessMm);
+  const thinnest = thinLandmarks[0];
+  const pressure = pressureFeedback;
+  hybridState.textContent = pressure?.applied ? `已优化 ${pressure.iteration} 次` : '先验已拟合';
+  hybridSummary.innerHTML = `
+    <div class="hybrid-metrics">
+      <div><span>PCA 配准置信度</span><strong>${Math.round(anatomyPrior.confidence * 100)}%</strong></div>
+      <div><span>估计最薄软组织</span><strong>${thinnest ? `${thinnest.thicknessMm} mm` : '--'}</strong></div>
+      <div><span>压力峰值</span><strong>${pressure ? `${pressure.peakKpa} kPa` : '--'}</strong></div>
+    </div>
+    <div class="hybrid-note">OpenLimbTT 真实 PCA：模态 1 ${signed(anatomyPrior.modes.residualLength)}，模态 2 ${signed(anatomyPrior.modes.bulbousConicalProfile)}；配准 RMSE ${anatomyPrior.registrationRmseMm} mm。</div>
+    <div class="hybrid-note">${pressure ? `SocketSense walking 实测 P95 映射：均值 ${pressure.meanKpa} kPa，高风险感测点 ${pressure.highCount} 个。` : '生成接受腔后将映射 SocketSense walking 实测传感器统计。'}</div>
+    <div class="hybrid-note">提示：OpenLimbTT 内部解剖由真实 PCA 基底估计；SocketSense 试验数据来自股残肢，跨部位映射仅用于研究原型。</div>
+  `;
+  if (pressureOptimizeBtn) {
+    pressureOptimizeBtn.disabled = !socketMesh || (pressure?.iteration || 0) >= 3;
+    pressureOptimizeBtn.textContent = (pressure?.iteration || 0) >= 3 ? '已完成三次压力优化' : '运行压力反馈优化';
+  }
+}
+
+function optimizeFromPressureFeedback() {
+  if (!socketMesh || !anatomyPrior) return;
+  const nextIteration = Math.min(3, (pressureFeedback?.iteration || 0) + 1);
+  pressureFeedback = estimateCurrentPressure(nextIteration);
+  pressureFeedback.applied = true;
+  currentRiskZones = pressureZonesForHeatmap(pressureFeedback, semanticLabelNames());
+  refreshSocketGeometry();
+  recordSocketVersion(`压力反馈优化 ${nextIteration}`);
+  renderHybridSummary();
+  activateStep('edit', { complete: ['scan', 'landmarks', 'ai'], uncomplete: ['edit', 'export'] });
+  setInspectorPane('params');
+  hint.textContent = `压力反馈优化第 ${nextIteration} 次完成：局部外扩已按压力超限量平滑叠加，预测峰值 ${pressureFeedback.peakKpa} kPa。`;
+}
+
 function defaultRiskZones() {
   if (semanticMap?.summary?.length) {
     const selected = ['anterior_tibia', 'fibula_head', 'distal_end', 'posterior_soft_tissue'];
@@ -2328,28 +2431,55 @@ function defaultRiskZones() {
 
 function buildHeatZones() {
   heatGroup.clear();
-  if (!socketMesh || !metrics) return;
-  applyHeatMapToGeometry(socketMesh.geometry, controls.heatToggle.checked ? currentRiskZones : []);
-  currentRiskZones.forEach((zone) => {
-    const surface = surfacePointForZone(socketMesh.geometry, zone);
-    const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16), heatMaterial);
-    mesh.position.copy(surface.point);
-    mesh.position.addScaledVector(surface.outward, 0.004);
-    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), surface.outward);
-    const zoneSize = Math.max(0.018, metrics.height * Math.max(0.06, zone.radius * 0.5));
-    mesh.scale.set(zoneSize * 0.55, zoneSize, 0.009);
-    mesh.material = new THREE.MeshBasicMaterial({
-      color: riskColorHex(zone.color),
-      transparent: true,
-      opacity: zone.severity === 'high' ? 0.55 : 0.38,
-      side: THREE.DoubleSide,
-      depthWrite: false
+  if (!metrics) return;
+  applySemanticColorsToLimb(limbMesh, semanticMap);
+  if (controls.heatToggle.checked) {
+    applyRiskOverlayToGeometry(limbMesh?.geometry, currentRiskZones.filter((zone) => zone.severity !== 'low'));
+  }
+  heatGroup.visible = false;
+}
+
+function applyRiskOverlayToGeometry(geometry, zones) {
+  if (!geometry || !zones?.length) return;
+  const pos = geometry.attributes.position;
+  const colorAttr = geometry.attributes.color;
+  if (!pos || !colorAttr) return;
+  geometry.computeBoundingBox();
+  const box = geometry.boundingBox;
+  const spanY = Math.max(0.001, box.max.y - box.min.y);
+  const red = new THREE.Color(0xe9414f);
+  const yellow = new THREE.Color(0xf3c23f);
+
+  for (let i = 0; i < pos.count; i += 1) {
+    const yNorm = (pos.getY(i) - box.min.y) / spanY;
+    const sectionIndex = modelProfile
+      ? Math.min(modelProfile.length - 1, Math.max(0, Math.round(yNorm * (modelProfile.length - 1))))
+      : 0;
+    const section = modelProfile?.[sectionIndex];
+    const centerX = section?.centerX || 0;
+    const centerZ = section?.centerZ || 0;
+    const thetaNorm = ((Math.atan2(pos.getZ(i) - centerZ, pos.getX(i) - centerX) / (Math.PI * 2)) + 1) % 1;
+    let strongest = 0;
+    let target = null;
+
+    zones.forEach((zone) => {
+      const dy = yNorm - zone.y;
+      const dt = circularDistance(thetaNorm, zone.theta);
+      const radius = Math.max(0.035, zone.radius * 0.72);
+      const influence = Math.exp(-((dy / radius) ** 2 + (dt / (radius * 0.72)) ** 2) * 2.2);
+      if (influence > strongest) {
+        strongest = influence;
+        target = zone.severity === 'high' ? red : yellow;
+      }
     });
-    mesh.name = zone.label;
-    mesh.renderOrder = 4;
-    heatGroup.add(mesh);
-  });
-  heatGroup.visible = controls.heatToggle.checked;
+
+    if (target && strongest > 0.05) {
+      const current = new THREE.Color(colorAttr.getX(i), colorAttr.getY(i), colorAttr.getZ(i));
+      current.lerp(target, Math.min(0.82, strongest * 0.9));
+      colorAttr.setXYZ(i, current.r, current.g, current.b);
+    }
+  }
+  colorAttr.needsUpdate = true;
 }
 
 function surfacePointForZone(geometry, zone) {
@@ -2376,7 +2506,10 @@ function surfacePointForZone(geometry, zone) {
   }
 
   const point = new THREE.Vector3(pos.getX(bestIndex), pos.getY(bestIndex), pos.getZ(bestIndex));
-  const outward = new THREE.Vector3(point.x, 0, point.z);
+  const data = radialData[bestIndex] || {};
+  const outward = Number.isFinite(data.theta)
+    ? new THREE.Vector3(Math.cos(data.theta), 0, Math.sin(data.theta))
+    : new THREE.Vector3(point.x, 0, point.z);
   if (outward.lengthSq() < 1e-8) outward.set(Math.cos(zone.theta * Math.PI * 2), 0, Math.sin(zone.theta * Math.PI * 2));
   outward.normalize();
   return { point, outward };
@@ -2439,26 +2572,117 @@ function updateRecommendations() {
   const relief = Number(controls.relief.value);
   const distal = Number(controls.distal.value);
   const trim = Number(controls.trim.value);
-  const patient = patientContext();
   const volume = currentGenerationMeta?.volumeConservation;
+  const pressure = pressureFeedback;
   const highLabels = semanticMap?.summary
     ?.filter((entry) => entry.severity === 'high')
     .map((entry) => SEMANTIC_LABELS[entry.id].short)
     .join('、') || '当前无明显高曲率骨突';
-  const baseCards = [
-    ['整体包容量', `残肢最大围度约 ${Math.round(metrics.circumference * 1000)} mm，初始外扩 ${offset.toFixed(1)} mm，用于预留软组织形变与袜套空间。`, false],
-    ['语义标签驱动', `AI 已识别 ${semanticMap?.labelCount || 0} 类残肢标签；${highLabels} 等高风险区会自动增加局部减压，后侧软组织区作为承重参考，不再对初版几何做向内收缩。`, true],
-    ['患者画像系数', `${patient.activityLevel} 活动等级、${patient.bodyWeightKg} kg、${tissueLabel(patient.tissueFirmness)}软组织：稳定系数 ${patient.stabilityCoeff.toFixed(2)}，敏感区减压系数 ${patient.sensitivityCoeff.toFixed(2)}。`, false],
-    ['体积守恒补偿', volume ? `承重区回收 ${volume.removedMm3} mm³，系统自动在减压区和近端边缘释放 ${volume.releasedMm3} mm³，避免局部收紧后整体过压。` : '生成后将计算承重区回收体积，并在减压区或边缘区进行补偿释放。', false],
-    ['胫骨前缘减压', `识别为高压敏感区，基础减压 ${relief.toFixed(1)} mm，并叠加语义标签对应的局部调整量。`, true],
-    ['末端包容', `远端区域增加 ${distal.toFixed(1)} mm 包容，减少末端集中承压，适合作为初版试穿前方案。`, false],
-    ['近端修边', `修边高度设置为残肢扫描高度的 ${trim}%；AI 保留较高包覆以保证悬吊与稳定性。`, false]
-  ].map(([title, body, warn]) => `<div class="rec ${warn ? 'warn' : ''}"><strong>${title}</strong>${body}</div>`).join('');
+  const severityOrder = { high: 3, medium: 2, low: 1 };
+  const risks = [...currentRiskZones].sort((a, b) => {
+    const severityDelta = severityOrder[b.severity] - severityOrder[a.severity];
+    if (severityDelta) return severityDelta;
+    return pressureValueFromZone(b) - pressureValueFromZone(a);
+  });
+  const topRisks = risks.slice(0, 3);
+  const remainingRisks = risks.slice(3);
+  const referenceSeverity = risks.some((zone) => zone.severity === 'high')
+    ? 'high'
+    : risks.some((zone) => zone.severity === 'medium') ? 'medium' : 'low';
+  const baselinePeak = pressure?.baselinePeakKpa ?? pressure?.peakKpa ?? 0;
+  const baselineHighCount = pressure?.baselineHighCount ?? pressure?.highCount ?? 0;
+  const peakReductionPercent = baselinePeak > 0 && pressure
+    ? Math.max(0, ((baselinePeak - pressure.peakKpa) / baselinePeak) * 100)
+    : 0;
+  const highRiskReduction = pressure ? Math.max(0, baselineHighCount - pressure.highCount) : 0;
+  const improvement = pressureImprovementState(pressure, peakReductionPercent);
+  const pressureState = pressure
+    ? `${baselinePeak.toFixed(1)} → ${pressure.peakKpa.toFixed(1)} kPa`
+    : '等待生成压力评估';
+  const nextAction = pressureNextAction(pressure);
+  const topRiskCards = topRisks.map((zone, index) => `
+    <article class="priority-risk ${zone.severity}">
+      <span class="risk-rank">${index + 1}</span>
+      <span class="risk-copy">
+        <strong>${escapeHtml(zone.label)}</strong>
+        <small>${escapeHtml(zone.reason)}</small>
+      </span>
+      <span class="risk-value">${pressureValueFromZone(zone) ? `${pressureValueFromZone(zone).toFixed(1)} kPa` : riskLabel(zone.severity)}</span>
+    </article>
+  `).join('');
+  const allRiskCards = remainingRisks.map((zone) => `
+    <div class="detail-row">
+      <strong>${escapeHtml(zone.label)} · ${riskLabel(zone.severity)}</strong>
+      <span>${escapeHtml(zone.reason)}</span>
+    </div>
+  `).join('');
 
-  const riskCards = currentRiskZones.map((zone) => (
-    `<div class="rec ${zone.severity}"><strong>${zone.label} · ${riskLabel(zone.severity)}</strong>${zone.reason}</div>`
-  )).join('');
-  recommendations.innerHTML = baseCards + riskCards;
+  recommendations.innerHTML = `
+    <section class="advice-summary ${referenceSeverity}">
+      <div>
+        <span class="eyebrow">参考载荷风险</span>
+        <strong>${riskLabel(referenceSeverity)}</strong>
+        <p>${nextAction}</p>
+      </div>
+      <div class="advice-summary-metrics">
+        <span>设计改善状态<strong>${improvement.label}</strong></span>
+        <span>峰值变化<strong>${pressureState}${pressure?.applied ? ` ↓${peakReductionPercent.toFixed(1)}%` : ''}</strong></span>
+        <span>高风险点<strong>${pressure ? `${baselineHighCount} → ${pressure.highCount}${highRiskReduction ? ` ↓${highRiskReduction}` : ''}` : '--'}</strong></span>
+        <span>语义风险<strong>${highLabels}</strong></span>
+      </div>
+    </section>
+
+    <section class="parameter-summary">
+      <div><span>整体包容量</span><strong>${offset.toFixed(1)} mm</strong></div>
+      <div><span>胫骨前缘减压</span><strong>${relief.toFixed(1)} mm</strong></div>
+      <div><span>末端包容</span><strong>${distal.toFixed(1)} mm</strong></div>
+      <small>近端修边 ${trim}% · 最大围度 ${Math.round(metrics.circumference * 1000)} mm</small>
+    </section>
+
+    <div class="advice-section-title">
+      <strong>优先处理风险区</strong>
+      <span>Top ${topRisks.length}</span>
+    </div>
+    <section class="priority-risks">${topRiskCards || '<div class="empty">当前没有需要优先处理的风险区。</div>'}</section>
+
+    <details class="advice-details">
+      <summary>查看设计依据</summary>
+      <div class="detail-row"><strong>语义标签驱动</strong><span>识别 ${semanticMap?.labelCount || 0} 类标签；${highLabels} 等敏感区自动增加局部减压。</span></div>
+      <div class="detail-row"><strong>压力反馈</strong><span>${pressure ? `SocketSense walking 实测统计映射均值 ${pressure.meanKpa} kPa；${pressure.applied ? `已应用第 ${pressure.iteration} 次修正。` : '尚未写入反馈修正。'}` : '生成后建立压力映射。'}</span></div>
+      <div class="detail-row"><strong>体积守恒</strong><span>${volume ? `回收 ${volume.removedMm3} mm³，释放 ${volume.releasedMm3} mm³。` : '生成后计算体积补偿。'}</span></div>
+    </details>
+
+    ${remainingRisks.length ? `
+      <details class="advice-details">
+        <summary>查看其余 ${remainingRisks.length} 个风险区</summary>
+        ${allRiskCards}
+      </details>
+    ` : ''}
+  `;
+}
+
+function pressureValueFromZone(zone) {
+  const value = Number(String(zone.label || '').match(/([\d.]+)\s*kPa/)?.[1]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function pressureImprovementState(pressure, reductionPercent) {
+  if (!pressure) return { id: 'pending', label: '等待评估' };
+  if (!pressure.applied) return { id: 'pending', label: '待优化' };
+  if (pressure.highCount === 0 && pressure.peakKpa <= 62) return { id: 'resolved', label: '风险已缓解' };
+  if (reductionPercent >= 10) return { id: 'strong', label: '明显改善中' };
+  if (reductionPercent >= 3) return { id: 'mild', label: '轻度改善' };
+  return { id: 'limited', label: '改善有限' };
+}
+
+function pressureNextAction(pressure) {
+  if (!pressure) return '生成接受腔后建立参考载荷评估。';
+  if (!pressure.applied) return '建议运行压力反馈优化，再复核优先风险区。';
+  if (pressure.iteration >= 3 && pressure.highCount > 0) {
+    return `自动优化已达到间隙上限，仍有 ${pressure.highCount} 个高风险点，建议人工复核。`;
+  }
+  if (pressure.highCount === 0) return '参考载荷风险已缓解，建议进行最终人工复核。';
+  return `已完成第 ${pressure.iteration} 次反馈优化，可继续优化并复核优先风险区。`;
 }
 
 function riskLabel(severity) {
@@ -2495,7 +2719,6 @@ function updateOutputs() {
   outputs.relief.textContent = `${Number(controls.relief.value).toFixed(1)} mm`;
   outputs.distal.textContent = `${Number(controls.distal.value).toFixed(1)} mm`;
   if (outputs.brushStrength) outputs.brushStrength.textContent = `${brushStrengthMm().toFixed(1)} mm`;
-  if (outputs.weight) outputs.weight.textContent = `${controls.bodyWeight?.value || 70} kg`;
 }
 
 function syncUserAvatar() {
@@ -2620,7 +2843,9 @@ function buildModelSummary() {
     semanticTopologyActions: currentGenerationMeta?.semanticActions || [],
     volumeConservation: currentGenerationMeta?.volumeConservation || null,
     versionDelta: latest?.delta || null,
-    currentRiskZones
+    currentRiskZones,
+    anatomyPrior,
+    pressureFeedback
   };
 }
 
@@ -2631,9 +2856,15 @@ function applyGeminiRefinement(result, modelName) {
   controls.trim.value = clamp(Number(controls.trim.value) + c.trimDeltaPercent, 50, 90);
   controls.relief.value = clamp(Number(controls.relief.value) + c.reliefDeltaMm, 0, 10);
   controls.distal.value = clamp(Number(controls.distal.value) + c.distalDeltaMm, 0, 18);
-  currentRiskZones = geminiRefinement.riskZones;
+  const pressureIteration = pressureFeedback?.applied ? pressureFeedback.iteration : 0;
+  pressureFeedback = estimateCurrentPressure(pressureIteration);
+  if (pressureFeedback) pressureFeedback.applied = pressureIteration > 0;
+  currentRiskZones = pressureFeedback
+    ? pressureZonesForHeatmap(pressureFeedback, semanticLabelNames())
+    : geminiRefinement.riskZones;
   updateOutputs();
   refreshSocketGeometry();
+  renderHybridSummary();
   recordSocketVersion('Gemini 复核');
   renderGeminiResult(modelName);
   activateStep('edit', { complete: ['scan', 'landmarks', 'ai'], uncomplete: ['edit', 'export'] });
@@ -2809,6 +3040,8 @@ function restoreSocketVersion(versionId) {
     semanticActions: version.semanticActions
   };
   geminiRefinement = structuredCloneSafe(version.geminiRefinement);
+  anatomyPrior = structuredCloneSafe(version.anatomyPrior) || anatomyPrior;
+  pressureFeedback = structuredCloneSafe(version.pressureFeedback) || null;
   currentRiskZones = structuredCloneSafe(version.riskZones) || [];
   clearPaintUndoStack();
   clearPaintMarkers();
@@ -2817,6 +3050,7 @@ function restoreSocketVersion(versionId) {
   renderVersionDelta();
   renderSidebarVersions();
   updateRecommendations();
+  renderHybridSummary();
   updateMetrics(true);
   hint.textContent = `已切换到 ${version.id} · ${version.source}。`;
 }
@@ -3151,6 +3385,7 @@ fileInput.addEventListener('change', (event) => {
 sampleBtn.addEventListener('click', loadSample);
 generateBtn.addEventListener('click', generateSocket);
 geminiBtn.addEventListener('click', refineWithGemini);
+pressureOptimizeBtn?.addEventListener('click', optimizeFromPressureFeedback);
 userName?.addEventListener('input', syncUserAvatar);
 exportBtn.addEventListener('click', async () => {
   if (!socketMesh) generateSocket();
@@ -3191,32 +3426,20 @@ controls.brushStrength?.addEventListener('input', () => {
     if (key === 'trim') controls.trim.dataset.userChanged = 'true';
     updateOutputs();
     if (socketMesh) {
+      const iteration = pressureFeedback?.applied ? pressureFeedback.iteration : 0;
+      pressureFeedback = estimateCurrentPressure(iteration);
+      if (pressureFeedback) {
+        pressureFeedback.applied = iteration > 0;
+        currentRiskZones = pressureZonesForHeatmap(pressureFeedback, semanticLabelNames());
+      }
       refreshSocketGeometry();
-    }
-  });
-});
-
-['activityLevel', 'bodyWeight', 'tissueFirmness'].forEach((key) => {
-  controls[key]?.addEventListener('input', () => {
-    updateOutputs();
-    if (socketMesh) {
-      refreshSocketGeometry();
-      hint.textContent = '患者画像已更新：语义标签对应的减压、收紧和体积补偿系数已重新计算。';
-    } else {
-      updateRecommendations();
+      renderHybridSummary();
     }
   });
 });
 
 controls.heatToggle.addEventListener('change', () => {
-  heatGroup.visible = controls.heatToggle.checked;
-  if (socketMesh) {
-    applyHeatMapToGeometry(socketMesh.geometry, controls.heatToggle.checked ? currentRiskZones : []);
-    if (wireMesh) {
-      wireMesh.geometry.dispose();
-      wireMesh.geometry = socketMesh.geometry.clone();
-    }
-  }
+  buildHeatZones();
 });
 controls.wireToggle.addEventListener('change', () => {
   if (wireMesh) wireMesh.visible = controls.wireToggle.checked;
@@ -3255,8 +3478,8 @@ versionTimeline?.addEventListener('click', (event) => {
   const button = event.target.closest('.version');
   if (!button) return;
   restoreSocketVersion(button.dataset.versionId);
-  activateStep('export', { complete: ['scan', 'landmarks', 'ai', 'edit', 'export'] });
-  setInspectorPane('manufacture');
+  activateStep('ai', { complete: ['scan', 'landmarks'], uncomplete: ['export'] });
+  setInspectorPane('advice');
 });
 
 document.querySelector('#viewBoth').addEventListener('click', () => {

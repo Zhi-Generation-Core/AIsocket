@@ -151,35 +151,6 @@
             <section class="panel">
               <div class="panel-head">
                 <div>
-                  <span class="eyebrow">患者画像 Context</span>
-                  <h3>动态调整系数</h3>
-                </div>
-              </div>
-              <div class="control">
-                <label for="activityLevel">活动等级</label>
-                <select id="activityLevel">
-                  <option value="K2">K2 日常步行</option>
-                  <option value="K3" selected>K3 社区活动</option>
-                  <option value="K4">K4 高活动</option>
-                </select>
-              </div>
-              <div class="control">
-                <label for="bodyWeight">体重 <output id="weightOut">70 kg</output></label>
-                <input id="bodyWeight" type="range" min="40" max="110" step="1" value="70" />
-              </div>
-              <div class="control">
-                <label for="tissueFirmness">残肢软组织</label>
-                <select id="tissueFirmness">
-                  <option value="firm">Firm 紧实</option>
-                  <option value="balanced" selected>Balanced 中等</option>
-                  <option value="fleshy">Fleshy 松软</option>
-                </select>
-              </div>
-            </section>
-
-            <section class="panel">
-              <div class="panel-head">
-                <div>
                   <span class="eyebrow">接受腔参数</span>
                   <h3>参数编辑</h3>
                 </div>
@@ -206,8 +177,23 @@
               </div>
               <div class="toggle-row">
                 <label><input id="semanticToggle" type="checkbox" checked /> 语义标签</label>
+                <label><input id="heatToggle" type="checkbox" /> 压力热图</label>
                 <label><input id="wireToggle" type="checkbox" checked /> 网格线</label>
               </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <span class="eyebrow">数据驱动优化</span>
+                  <h3>解剖先验与压力反馈</h3>
+                </div>
+                <span id="hybridState" class="status">待拟合</span>
+              </div>
+              <div id="hybridSummary" class="hybrid-summary">
+                <div class="empty">导入残肢后，系统将拟合 OpenLimbTT 真实 PCA 基底；生成接受腔后可使用 SocketSense 真实试验数据运行压力反馈优化。</div>
+              </div>
+              <button id="pressureOptimizeBtn" class="secondary-button hybrid-button" type="button" disabled>运行压力反馈优化</button>
             </section>
 
             <section class="panel compact">
@@ -264,6 +250,6 @@
         }
       }
     </script>
-    <script type="module" src="./renderer.js?v=import-loading-20260602"></script>
+    <script type="module" src="./renderer.js?v=hybrid-b-20260609"></script>
   </body>
 </html>
