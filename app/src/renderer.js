@@ -20,6 +20,7 @@ const caseActivity = document.querySelector('#caseActivity');
 const caseWeight = document.querySelector('#caseWeight');
 const caseTissue = document.querySelector('#caseTissue');
 const caseMeta = document.querySelector('#caseMeta');
+const caseTitle = document.querySelector('#caseTitle');
 const recommendations = document.querySelector('#recommendations');
 const semanticTags = document.querySelector('#semanticTags');
 const versionDelta = document.querySelector('#versionDelta');
@@ -32,6 +33,8 @@ const workflowProgress = document.querySelector('#workflowProgress');
 const workflowNext = document.querySelector('#workflowNext');
 const versionTimeline = document.querySelector('#versionTimeline');
 const addVersionBtn = document.querySelector('#addVersionBtn');
+const importSocketBtn = document.querySelector('#importSocketBtn');
+const socketFileInput = document.querySelector('#socketFileInput');
 const deleteVersionBtn = document.querySelector('#deleteVersionBtn');
 const userName = document.querySelector('#userName');
 const userAvatar = document.querySelector('#userAvatar');
@@ -51,6 +54,15 @@ const importProgressTitle = document.querySelector('#importProgressTitle');
 const importProgressText = document.querySelector('#importProgressText');
 const importProgressBar = document.querySelector('#importProgressBar');
 const importProgressPercent = document.querySelector('#importProgressPercent');
+const brushSizeHud = document.querySelector('#brushSizeHud');
+const brushSizeHudValue = document.querySelector('#brushSizeHudValue');
+const brushSizeHudRadius = document.querySelector('#brushSizeHudRadius');
+const versionNameDialog = document.querySelector('#versionNameDialog');
+const versionNameForm = document.querySelector('#versionNameForm');
+const versionNameTitle = document.querySelector('#versionNameTitle');
+const versionNameText = document.querySelector('#versionNameText');
+const versionNameInput = document.querySelector('#versionNameInput');
+const versionNameCancel = document.querySelector('#versionNameCancel');
 
 const controls = {
   offset: document.querySelector('#offset'),
@@ -157,6 +169,7 @@ let anatomyPrior = null;
 let pressureFeedback = null;
 let parameterUpdateTimer = null;
 let patientContextTimer = null;
+let brushHudTimer = null;
 let lastStlExportPath = null;
 let patientProfile = {
   activityLevel: 'K3',
@@ -1527,8 +1540,10 @@ function renderSemanticTags() {
 function recordSocketVersion(source, options = {}) {
   if (!socketMesh) return null;
   const previous = selectedVersion() || socketVersions.at(-1) || null;
+  const fallbackName = `版本 ${nextVersionNumber}`;
   const snapshot = {
     id: `V${nextVersionNumber++}`,
+    name: String(options.name || fallbackName).trim() || fallbackName,
     source,
     createdAt: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
     geometry: socketMesh.geometry.clone(),
@@ -1546,7 +1561,8 @@ function recordSocketVersion(source, options = {}) {
     anatomyPrior: structuredCloneSafe(anatomyPrior),
     pressureFeedback: structuredCloneSafe(pressureFeedback),
     riskZones: structuredCloneSafe(currentRiskZones),
-    manual: Boolean(options.manual)
+    manual: Boolean(options.manual),
+    external: Boolean(options.external)
   };
   snapshot.delta = previous ? {
     offsetMm: snapshot.params.offsetMm - previous.params.offsetMm,
@@ -1652,6 +1668,41 @@ function normalizeImportedMesh(mesh) {
   return normalized;
 }
 
+function normalizeImportedSocketMesh(mesh) {
+  const targetMesh = mesh.isMesh ? mesh : firstMesh(mesh);
+  if (!targetMesh) return null;
+  const geometry = targetMesh.geometry.clone();
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+
+  const center = geometry.boundingBox.getCenter(new THREE.Vector3());
+  geometry.translate(-center.x, -center.y, -center.z);
+  geometry.computeBoundingBox();
+  alignPrincipalAxisToY(geometry);
+  orientOpenEndUp(geometry);
+  geometry.computeBoundingBox();
+
+  const limbBox = limbMesh ? new THREE.Box3().setFromObject(limbMesh) : null;
+  const targetHeight = limbBox ? Math.max(0.001, limbBox.max.y - limbBox.min.y) * 1.02 : 0.42;
+  const ySize = Math.max(0.001, geometry.boundingBox.max.y - geometry.boundingBox.min.y);
+  const scale = targetHeight / ySize;
+  geometry.scale(scale, scale, scale);
+  geometry.computeBoundingBox();
+
+  const normalizedBox = geometry.boundingBox;
+  const normalizedCenter = normalizedBox.getCenter(new THREE.Vector3());
+  const targetCenter = limbBox ? limbBox.getCenter(new THREE.Vector3()) : new THREE.Vector3();
+  const targetMinY = limbBox ? limbBox.min.y : 0;
+  geometry.translate(targetCenter.x - normalizedCenter.x, targetMinY - normalizedBox.min.y, targetCenter.z - normalizedCenter.z);
+  orientOpenEndUpAroundTarget(geometry, targetMinY);
+  geometry.computeVertexNormals();
+
+  const normalized = new THREE.Mesh(geometry, socketMaterial);
+  normalized.name = mesh.name || '导入接受腔';
+  normalized.renderOrder = 2;
+  return normalized;
+}
+
 function firstMesh(object) {
   let found = null;
   object.traverse((child) => {
@@ -1734,6 +1785,39 @@ function orientOpenEndUp(geometry) {
   const bottomRadius = bottom.length ? percentile(bottom, 0.82) : 0;
   const topRadius = top.length ? percentile(top, 0.82) : 0;
   if (bottomRadius > topRadius * 1.04) flipGeometryY(geometry);
+}
+
+function orientOpenEndUpAroundTarget(geometry, targetMinY = 0) {
+  geometry.computeBoundingBox();
+  const before = geometry.boundingBox;
+  const beforeMinY = before.min.y;
+  const beforeMaxY = before.max.y;
+  const boundaryY = detectOpenBoundaryY(geometry);
+  const midpoint = (beforeMinY + beforeMaxY) / 2;
+  let shouldFlip = boundaryY != null && boundaryY < midpoint;
+
+  if (!shouldFlip) {
+    const pos = geometry.attributes.position;
+    const span = Math.max(0.001, beforeMaxY - beforeMinY);
+    const bottom = [];
+    const top = [];
+    for (let i = 0; i < pos.count; i += 1) {
+      const y = pos.getY(i);
+      const r = Math.hypot(pos.getX(i), pos.getZ(i));
+      if (y < beforeMinY + span * 0.08) bottom.push(r);
+      if (y > beforeMaxY - span * 0.08) top.push(r);
+    }
+    const bottomRadius = bottom.length ? percentile(bottom, 0.82) : 0;
+    const topRadius = top.length ? percentile(top, 0.82) : 0;
+    shouldFlip = bottomRadius > topRadius * 1.04;
+  }
+
+  if (!shouldFlip) return;
+  geometry.rotateZ(Math.PI);
+  geometry.computeBoundingBox();
+  const box = geometry.boundingBox;
+  const center = box.getCenter(new THREE.Vector3());
+  geometry.translate(-center.x, targetMinY - box.min.y, -center.z);
 }
 
 function detectOpenBoundaryY(geometry) {
@@ -1883,7 +1967,9 @@ async function generateSocket() {
     setAiState('已生成');
     updateRecommendations();
     updateMetrics(true);
-    recordSocketVersion('算法生成');
+    if (!socketVersions.length) {
+      recordSocketVersion('算法生成', { name: '初始算法版本' });
+    }
     renderHybridSummary();
     activateStep('ai', { complete: ['scan', 'landmarks'], uncomplete: ['ai', 'edit', 'export'] });
     hint.textContent = 'AI 初版已生成。打开“局部减压画笔”后，在接受腔表面点击可添加局部外扩修形。';
@@ -2418,11 +2504,10 @@ function optimizeFromPressureFeedback() {
   pressureFeedback.applied = true;
   currentRiskZones = pressureZonesForHeatmap(pressureFeedback, semanticLabelNames());
   refreshSocketGeometry();
-  recordSocketVersion(`压力反馈优化 ${nextIteration}`);
   renderHybridSummary();
   activateStep('edit', { complete: ['scan', 'landmarks', 'ai'], uncomplete: ['edit', 'export'] });
   setInspectorPane('params');
-  hint.textContent = `压力反馈优化第 ${nextIteration} 次完成：局部外扩已按压力超限量平滑叠加，预测峰值 ${pressureFeedback.peakKpa} kPa。`;
+  hint.textContent = `压力反馈优化第 ${nextIteration} 次完成：当前工作态已更新。需要留档时请点击“保存版本”。`;
 }
 
 function defaultRiskZones() {
@@ -2802,6 +2887,26 @@ function syncCaseSummary() {
   caseMeta.textContent = `${patient.activityLevel} 活动等级 · ${patient.bodyWeightKg} kg · ${tissueLabel(patient.tissueFirmness)}软组织`;
 }
 
+function currentCaseInfo() {
+  const rawTitle = (caseTitle?.textContent || '张某 · 右下肢截肢').replace(/\s+/g, ' ').trim();
+  const parts = rawTitle.split(/[·|｜]/).map((part) => part.trim()).filter(Boolean);
+  const patientName = parts[0] || rawTitle || '未命名患者';
+  const limbSite = parts.slice(1).join(' · ') || inferLimbSite(rawTitle);
+  return {
+    title: rawTitle || `${patientName} · ${limbSite}`,
+    patientName,
+    limbSite
+  };
+}
+
+function inferLimbSite(text) {
+  if (/左/.test(text) && /上肢|前臂|手/.test(text)) return '左上肢截肢';
+  if (/右/.test(text) && /上肢|前臂|手/.test(text)) return '右上肢截肢';
+  if (/左/.test(text)) return '左下肢截肢';
+  if (/右/.test(text)) return '右下肢截肢';
+  return '未填写残肢部位';
+}
+
 function normalizeCaseWeightInput() {
   if (!caseWeight) return;
   caseWeight.value = String(patientContext().bodyWeightKg);
@@ -2994,11 +3099,10 @@ function applyGeminiRefinement(result, modelName) {
   updateOutputs();
   refreshSocketGeometry();
   renderHybridSummary();
-  recordSocketVersion('Gemini 复核');
   renderGeminiResult(modelName);
   activateStep('edit', { complete: ['scan', 'landmarks', 'ai'], uncomplete: ['edit', 'export'] });
   setInspectorPane('advice');
-  hint.textContent = 'Gemini 复核完成：参数已保守校正，风险热图已按红/黄/绿等级重新标注。';
+  hint.textContent = 'Gemini 复核完成：当前工作态已更新。需要留档时请点击“保存版本”。';
 }
 
 function sanitizeRefinement(result) {
@@ -3124,7 +3228,7 @@ function activateStep(stepName, options = {}) {
 function renderSidebarVersions() {
   if (!versionTimeline) return;
   if (!socketVersions.length) {
-    versionTimeline.innerHTML = '<div class="timeline-empty">生成接受腔后，这里会记录真实版本。</div>';
+    versionTimeline.innerHTML = '<div class="timeline-empty">首次生成会记录 V1；后续请手动保存版本。</div>';
     if (deleteVersionBtn) deleteVersionBtn.disabled = true;
     return;
   }
@@ -3139,8 +3243,8 @@ function renderSidebarVersions() {
       const active = version.id === selectedVersionId;
       return `
         <button class="version ${active ? 'active' : ''}" type="button" data-version-id="${version.id}">
-          <strong>${version.id} ${escapeHtml(version.source)}</strong>
-          <small>${version.createdAt} · ${delta}</small>
+          <strong>${version.id} ${escapeHtml(version.name || version.source)}</strong>
+          <small>${version.createdAt} · ${escapeHtml(version.source)} · ${delta}</small>
         </button>
       `;
     })
@@ -3188,15 +3292,66 @@ function restoreSocketVersion(versionId) {
   hint.textContent = `已切换到 ${version.id} · ${version.source}。`;
 }
 
-function addManualVersion() {
+function askVersionName(defaultName, options = {}) {
+  if (!versionNameDialog || !versionNameForm || !versionNameInput) {
+    const input = window.prompt('请输入版本名称', defaultName);
+    if (input === null) return Promise.resolve(null);
+    return Promise.resolve(input.trim() || defaultName);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const close = (value) => {
+      if (settled) return;
+      settled = true;
+      versionNameDialog.hidden = true;
+      versionNameDialog.classList.remove('visible');
+      versionNameForm.removeEventListener('submit', handleSubmit);
+      versionNameCancel?.removeEventListener('click', handleCancel);
+      versionNameDialog.removeEventListener('pointerdown', handleBackdrop);
+      window.removeEventListener('keydown', handleKeydown);
+      resolve(value);
+    };
+    const handleSubmit = (event) => {
+      event.preventDefault();
+      close(versionNameInput.value.trim() || defaultName);
+    };
+    const handleCancel = () => close(null);
+    const handleBackdrop = (event) => {
+      if (event.target === versionNameDialog) close(null);
+    };
+    const handleKeydown = (event) => {
+      if (event.key === 'Escape') close(null);
+    };
+
+    if (versionNameTitle) versionNameTitle.textContent = options.title || '保存当前版本';
+    if (versionNameText) versionNameText.textContent = options.text || '为这个设计节点输入一个便于复诊追踪的名称。';
+    versionNameInput.value = defaultName;
+    versionNameDialog.hidden = false;
+    requestAnimationFrame(() => versionNameDialog.classList.add('visible'));
+    versionNameForm.addEventListener('submit', handleSubmit);
+    versionNameCancel?.addEventListener('click', handleCancel);
+    versionNameDialog.addEventListener('pointerdown', handleBackdrop);
+    window.addEventListener('keydown', handleKeydown);
+    versionNameInput.focus();
+    versionNameInput.select();
+  });
+}
+
+async function addManualVersion() {
   if (!socketMesh) {
-    hint.textContent = '请先生成接受腔，再手动新增版本。';
+    hint.textContent = '请先生成或导入接受腔，再保存版本。';
     return;
   }
-  recordSocketVersion('手动新增', { manual: true });
+  const name = await askVersionName(`手动版本 ${nextVersionNumber}`, {
+    title: '保存当前版本',
+    text: '为当前接受腔设计节点输入一个便于复诊追踪的名称。'
+  });
+  if (name === null) return;
+  recordSocketVersion('手动保存', { manual: true, name });
   activateStep('edit', { complete: ['scan', 'landmarks'] });
   setInspectorPane('params');
-  hint.textContent = `已基于上一版新增 ${selectedVersionId}，可继续调整参数或画笔。`;
+  hint.textContent = `已保存 ${selectedVersionId} · ${name}，可继续调整参数或画笔。`;
 }
 
 function deleteSelectedVersion() {
@@ -3273,6 +3428,88 @@ async function importModel(file) {
   } finally {
     fileInput.disabled = false;
     fileInput.value = '';
+  }
+}
+
+async function parseMeshFile(file, material) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  const buffer = await file.arrayBuffer();
+  if (ext === 'stl') {
+    const geometry = new STLLoader().parse(buffer);
+    return new THREE.Mesh(geometry, material);
+  }
+  if (ext === 'obj') {
+    const text = new TextDecoder().decode(buffer);
+    const obj = new OBJLoader().parse(text);
+    const meshes = [];
+    obj.traverse((child) => {
+      if (child.isMesh) meshes.push(child);
+    });
+    if (meshes.length === 1) return meshes[0];
+    return obj;
+  }
+  throw new Error('仅支持 STL 或 OBJ 文件');
+}
+
+async function importSocketModel(file) {
+  if (!modelProfile || !limbMesh) {
+    hint.textContent = '请先导入残肢模型，再导入外部接受腔。';
+    return;
+  }
+  const versionName = await askVersionName(`外部接受腔 ${nextVersionNumber}`, {
+    title: '命名外部接受腔',
+    text: '导入前先为这个外部接受腔版本命名，方便和算法版本区分。'
+  });
+  if (versionName === null) {
+    if (socketFileInput) socketFileInput.value = '';
+    return;
+  }
+  if (socketFileInput) socketFileInput.disabled = true;
+  await updateImportProgress(10, '导入接受腔', `正在读取 ${file.name}`);
+  try {
+    await updateImportProgress(38, '解析接受腔', '正在解析 STL/OBJ 网格。');
+    const parsed = await parseMeshFile(file, socketMaterial);
+    await updateImportProgress(64, '对齐当前病例', '正在将外部接受腔对齐到当前残肢坐标。');
+    const imported = normalizeImportedSocketMesh(parsed);
+    if (!imported) throw new Error('未找到可用接受腔网格');
+
+    if (socketMesh) scene.remove(socketMesh);
+    if (wireMesh) scene.remove(wireMesh);
+    socketMesh?.geometry?.dispose?.();
+    wireMesh?.geometry?.dispose?.();
+    socketMesh = imported;
+    wireMesh = new THREE.Mesh(socketMesh.geometry.clone(), wireMaterial);
+    wireMesh.renderOrder = 3;
+    wireMesh.visible = controls.wireToggle.checked;
+    scene.add(socketMesh, wireMesh);
+
+    pressureFeedback = estimateCurrentPressure(0);
+    currentRiskZones = pressureZonesForHeatmap(pressureFeedback, semanticLabelNames());
+    clearPaintUndoStack();
+    clearPaintMarkers();
+    buildHeatZones();
+    if (sectionMode) applySectionClipping();
+    updateRecommendations();
+    updateMetrics(true);
+    recordSocketVersion(`外部导入：${file.name}`, { manual: true, external: true, name: versionName });
+    renderHybridSummary();
+    activateStep('edit', { complete: ['scan', 'landmarks', 'ai'], uncomplete: ['export'] });
+    setInspectorPane('advice');
+    setToolButton('#viewSocket');
+    setVisibility('socket');
+    hint.textContent = `已导入外部接受腔并保存为 ${selectedVersionId} · ${versionName}。`;
+    await updateImportProgress(100, '导入完成', '外部接受腔已加入版本时间线。');
+    window.setTimeout(hideImportProgress, 650);
+  } catch (error) {
+    showImportProgress(100, '导入失败', error?.message || String(error), true);
+    hint.textContent = `外部接受腔导入失败：${error?.message || error}`;
+    console.error(error);
+    window.setTimeout(hideImportProgress, 1800);
+  } finally {
+    if (socketFileInput) {
+      socketFileInput.disabled = false;
+      socketFileInput.value = '';
+    }
   }
 }
 
@@ -3382,6 +3619,23 @@ function updateBrushCursorGeometry() {
   const radius = brushRadiusMeters();
   brushCursor.geometry.dispose();
   brushCursor.geometry = new THREE.TorusGeometry(radius, Math.max(0.0008, radius * 0.022), 8, 72);
+}
+
+function showBrushSizeHud() {
+  if (!brushSizeHud) return;
+  const strength = brushStrengthMm();
+  const radiusMm = Math.round(brushRadiusMeters() * 1000);
+  brushSizeHud.hidden = false;
+  brushSizeHud.classList.add('visible');
+  if (brushSizeHudValue) brushSizeHudValue.textContent = `${strength.toFixed(1)} mm`;
+  if (brushSizeHudRadius) brushSizeHudRadius.textContent = `影响半径约 ${radiusMm} mm`;
+  window.clearTimeout(brushHudTimer);
+  brushHudTimer = window.setTimeout(() => {
+    brushSizeHud.classList.remove('visible');
+    window.setTimeout(() => {
+      if (!brushSizeHud.classList.contains('visible')) brushSizeHud.hidden = true;
+    }, 180);
+  }, 850);
 }
 
 function pointerToSocketHit(event) {
@@ -3579,6 +3833,7 @@ async function exportFollowupReport() {
 
 function buildFollowupReportHtml() {
   const patient = patientContext();
+  const caseInfo = currentCaseInfo();
   const latest = selectedVersion();
   const reportTime = new Date().toLocaleString('zh-CN');
   const imageDataUrl = renderer.domElement.toDataURL('image/png');
@@ -3632,6 +3887,10 @@ function buildFollowupReportHtml() {
     h2 { margin-bottom: 14px; font-size: 18px; }
     p { color: var(--muted); line-height: 1.65; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .case-grid { display: grid; gap: 10px; margin-top: 16px; }
+    .case-row { display: grid; gap: 10px; }
+    .case-row.identity { grid-template-columns: repeat(2, 1fr); }
+    .case-row.context { grid-template-columns: repeat(3, 1fr); }
     .metric { padding: 12px; border-radius: 12px; background: #f7faf9; border: 1px solid #edf1ef; }
     .metric span { display: block; color: var(--muted); font-size: 12px; }
     .metric strong { display: block; margin-top: 5px; font-size: 15px; }
@@ -3656,12 +3915,17 @@ function buildFollowupReportHtml() {
     <div class="cover">
       <span class="eyebrow">Socket AI Follow-up Report</span>
       <h1>接受腔复诊报告</h1>
-      <p>报告时间：${escapeHtml(reportTime)} · 设计版本：${escapeHtml(latest?.id || '未生成版本')} · 当前状态：${escapeHtml(status)}</p>
-      <div class="grid" style="margin-top:16px">
-        <div class="metric"><span>患者侧别</span><strong>右下肢</strong></div>
-        <div class="metric"><span>活动等级</span><strong>${escapeHtml(patient.activityLevel)}</strong></div>
-        <div class="metric"><span>体重</span><strong>${patient.bodyWeightKg} kg</strong></div>
-        <div class="metric"><span>软组织状态</span><strong>${escapeHtml(tissueLabel(patient.tissueFirmness))}</strong></div>
+      <p>病例：${escapeHtml(caseInfo.title)} · 报告时间：${escapeHtml(reportTime)} · 设计版本：${escapeHtml(latest?.id || '未生成版本')} · 当前状态：${escapeHtml(status)}</p>
+      <div class="case-grid">
+        <div class="case-row identity">
+          <div class="metric"><span>患者姓名</span><strong>${escapeHtml(caseInfo.patientName)}</strong></div>
+          <div class="metric"><span>残肢部位</span><strong>${escapeHtml(caseInfo.limbSite)}</strong></div>
+        </div>
+        <div class="case-row context">
+          <div class="metric"><span>活动等级</span><strong>${escapeHtml(patient.activityLevel)}</strong></div>
+          <div class="metric"><span>体重</span><strong>${patient.bodyWeightKg} kg</strong></div>
+          <div class="metric"><span>软组织状态</span><strong>${escapeHtml(tissueLabel(patient.tissueFirmness))}</strong></div>
+        </div>
       </div>
     </div>
 
@@ -3816,10 +4080,16 @@ resetViewBtn?.addEventListener('click', resetView);
 fitViewBtn?.addEventListener('click', fitViewToModel);
 undoPaintBtn?.addEventListener('click', undoPaintStep);
 addVersionBtn?.addEventListener('click', addManualVersion);
+importSocketBtn?.addEventListener('click', () => socketFileInput?.click());
+socketFileInput?.addEventListener('change', (event) => {
+  const file = event.target.files?.[0];
+  if (file) importSocketModel(file);
+});
 deleteVersionBtn?.addEventListener('click', deleteSelectedVersion);
 [caseActivity, caseTissue].forEach((control) => {
   control?.addEventListener('change', schedulePatientContextUpdate);
 });
+caseTitle?.addEventListener('input', syncCaseSummary);
 caseWeight?.addEventListener('input', schedulePatientContextUpdate);
 caseWeight?.addEventListener('change', () => schedulePatientContextUpdate({ normalizeWeight: true }));
 caseWeight?.addEventListener('blur', normalizeCaseWeightInput);
@@ -3836,6 +4106,7 @@ sectionHeight?.addEventListener('input', () => {
 controls.brushStrength?.addEventListener('input', () => {
   updateOutputs();
   updateBrushCursorGeometry();
+  showBrushSizeHud();
 });
 
 ['offset', 'trim', 'relief', 'distal'].forEach((key) => {

@@ -19,7 +19,7 @@
 
         <div class="case-card">
           <span class="eyebrow">当前病例</span>
-          <strong contenteditable="true" spellcheck="false">张某 · 右下肢截肢</strong>
+          <strong id="caseTitle" contenteditable="true" spellcheck="false">张某 · 右下肢截肢</strong>
           <small id="caseMeta" class="case-summary">K3 活动等级 · 70 kg · 中等软组织</small>
           <div class="case-context" aria-label="患者画像参数">
             <label class="case-field" for="caseActivity">
@@ -85,12 +85,14 @@
           <div class="version-head">
             <span class="eyebrow">版本时间线</span>
             <div class="version-actions">
-              <button id="addVersionBtn" class="mini-button" type="button">新增</button>
+              <button id="addVersionBtn" class="mini-button" type="button">保存版本</button>
+              <button id="importSocketBtn" class="mini-button" type="button">导入接受腔</button>
+              <input id="socketFileInput" type="file" accept=".stl,.obj" hidden />
               <button id="deleteVersionBtn" class="mini-button danger" type="button" disabled>删除</button>
             </div>
           </div>
           <div id="versionTimeline" class="timeline">
-            <div class="timeline-empty">生成接受腔后，这里会记录真实版本。</div>
+            <div class="timeline-empty">首次生成会记录 V1；后续请手动保存版本。</div>
           </div>
         </div>
       </aside>
@@ -120,6 +122,23 @@
               </div>
               <small id="importProgressPercent">0%</small>
             </div>
+          </div>
+          <div id="brushSizeHud" class="brush-size-hud" hidden>
+            <span>画笔幅度</span>
+            <strong id="brushSizeHudValue">1.5 mm</strong>
+            <small id="brushSizeHudRadius">影响半径约 55 mm</small>
+          </div>
+          <div id="versionNameDialog" class="version-name-dialog" hidden>
+            <form id="versionNameForm" class="version-name-card">
+              <span class="eyebrow">版本命名</span>
+              <strong id="versionNameTitle">保存当前版本</strong>
+              <p id="versionNameText">为这个设计节点输入一个便于复诊追踪的名称。</p>
+              <input id="versionNameInput" type="text" autocomplete="off" maxlength="48" />
+              <div class="version-name-actions">
+                <button id="versionNameCancel" class="secondary-lite" type="button">取消</button>
+                <button class="primary-lite" type="submit">确定</button>
+              </div>
+            </form>
           </div>
           <div class="viewer-toolbar" aria-label="模型显示控制">
             <button id="viewBoth" class="tool icon-tool active" type="button" aria-label="显示残肢和接受腔" title="显示残肢和接受腔" data-tooltip="残肢 + 接受腔"><span aria-hidden="true">◐</span></button>
@@ -286,6 +305,6 @@
         }
       }
     </script>
-    <script type="module" src="./renderer.js?v=case-context-20260610"></script>
+    <script type="module" src="./renderer.js?v=centered-version-dialog-20260610"></script>
   </body>
 </html>
