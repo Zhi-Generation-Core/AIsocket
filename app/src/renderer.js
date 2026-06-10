@@ -1828,15 +1828,18 @@ function calculateMetrics(profile) {
 
 async function generateSocket() {
   if (!modelProfile) loadSample();
+  if (generateBtn.disabled) return;
+  generateBtn.disabled = true;
   setAiState('分析中');
   activateStep('ai');
   clearPaintMarkers();
   pressureFeedback = null;
-  await updateTaskProgress('算法生成', 10, '准备生成接受腔', '正在读取残肢轮廓和语义标签。');
-  await updateTaskProgress('算法生成', 32, '拟合设计参数', '正在计算包容量、修边高度和局部减压。');
-
-  window.setTimeout(async () => {
+  try {
+    await updateTaskProgress('算法生成', 10, '准备生成接受腔', '正在读取残肢轮廓和语义标签。');
+    await updateTaskProgress('算法生成', 32, '拟合设计参数', '正在计算包容量、修边高度和局部减压。');
+    await wait(180);
     showTaskProgress('算法生成', 58, '生成几何', '正在构建接受腔曲面网格。');
+    await wait(30);
     const geometry = createSocketGeometry();
     await updateTaskProgress('算法生成', 74, '应用预览材质', '正在更新透明外壳和线框视图。');
     if (socketMesh) scene.remove(socketMesh);
@@ -1863,7 +1866,15 @@ async function generateSocket() {
     hint.textContent = 'AI 初版已生成。打开“局部减压画笔”后，在接受腔表面点击可添加局部外扩修形。';
     await updateTaskProgress('算法生成', 100, '生成完成', '接受腔初版已生成，建议区已更新。');
     window.setTimeout(hideTaskProgress, 650);
-  }, 420);
+  } catch (error) {
+    console.error(error);
+    setAiState('生成失败');
+    hint.textContent = `接受腔生成失败：${error?.message || error}`;
+    await updateTaskProgress('算法生成', 100, '生成失败', error?.message || String(error), true);
+    window.setTimeout(hideTaskProgress, 1800);
+  } finally {
+    generateBtn.disabled = false;
+  }
 }
 
 function refreshSocketGeometry() {
@@ -2756,22 +2767,24 @@ function syncUserAvatar() {
 async function refineWithGemini() {
   setInspectorPane('advice');
   if (!socketMesh) {
-    generateSocket();
-    window.setTimeout(refineWithGemini, 620);
-    return;
+    await generateSocket();
+    if (!socketMesh) return;
   }
   if (!metrics) return;
+  if (geminiBtn.disabled) return;
+  geminiBtn.disabled = true;
   setAiState('Gemini 复核中');
-  await updateTaskProgress('AI 复核优化', 12, '准备复核', '正在整理当前参数、几何摘要和预览图。');
-  geminiResult.innerHTML = '<span class="eyebrow">大模型复核</span><div class="empty">正在把当前参数、几何摘要和3D预览交给 Gemini 分析...</div>';
-
-  await updateTaskProgress('AI 复核优化', 30, '采集预览', '正在截取当前 3D 设计视图。');
-  const payload = {
-    summary: buildModelSummary(),
-    imageDataUrl: renderer.domElement.toDataURL('image/png')
-  };
 
   try {
+    await updateTaskProgress('AI 复核优化', 12, '准备复核', '正在整理当前参数、几何摘要和预览图。');
+    geminiResult.innerHTML = '<span class="eyebrow">大模型复核</span><div class="empty">正在把当前参数、几何摘要和3D预览交给 Gemini 分析...</div>';
+
+    await updateTaskProgress('AI 复核优化', 30, '采集预览', '正在截取当前 3D 设计视图。');
+    const payload = {
+      summary: buildModelSummary(),
+      imageDataUrl: renderer.domElement.toDataURL('image/png')
+    };
+
     await updateTaskProgress('AI 复核优化', 46, '连接本地后端', '正在检查 Gemini 服务状态。');
     await ensureBackendReady();
     await updateTaskProgress('AI 复核优化', 62, '提交复核请求', '正在请求 Gemini 分析参数与风险区。');
@@ -2799,6 +2812,8 @@ async function refineWithGemini() {
     );
     await updateTaskProgress('AI 复核优化', 100, '已完成本地兜底', '本地规则复核结果已写入 AI 建议区。', true);
     window.setTimeout(hideTaskProgress, 1400);
+  } finally {
+    geminiBtn.disabled = false;
   }
 }
 
@@ -2999,6 +3014,10 @@ function smoothStep(edge0, edge1, value) {
   return x * x * (3 - 2 * x);
 }
 
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function escapeHtml(text) {
   return String(text)
     .replaceAll('&', '&amp;')
@@ -3181,25 +3200,38 @@ async function importModel(file) {
   }
 }
 
-function showImportProgress(percent, title, text, isError = false) {
+function showTaskProgress(taskLabel, percent, title, text, isError = false) {
   if (!importProgress) return;
   importProgress.hidden = false;
   importProgress.classList.toggle('error', isError);
+  if (importProgressEyebrow) importProgressEyebrow.textContent = taskLabel;
   importProgressTitle.textContent = title;
   importProgressText.textContent = text;
   importProgressBar.style.width = `${clamp(percent, 0, 100)}%`;
   importProgressPercent.textContent = `${Math.round(clamp(percent, 0, 100))}%`;
 }
 
-async function updateImportProgress(percent, title, text) {
-  showImportProgress(percent, title, text);
+async function updateTaskProgress(taskLabel, percent, title, text, isError = false) {
+  showTaskProgress(taskLabel, percent, title, text, isError);
   await new Promise((resolve) => requestAnimationFrame(resolve));
 }
 
-function hideImportProgress() {
+function hideTaskProgress() {
   if (!importProgress) return;
   importProgress.hidden = true;
   importProgress.classList.remove('error');
+}
+
+function showImportProgress(percent, title, text, isError = false) {
+  showTaskProgress('模型导入', percent, title, text, isError);
+}
+
+async function updateImportProgress(percent, title, text) {
+  await updateTaskProgress('模型导入', percent, title, text);
+}
+
+function hideImportProgress() {
+  hideTaskProgress();
 }
 
 function setVisibility(mode) {
@@ -3456,7 +3488,7 @@ geminiBtn.addEventListener('click', refineWithGemini);
 pressureOptimizeBtn?.addEventListener('click', optimizeFromPressureFeedback);
 userName?.addEventListener('input', syncUserAvatar);
 exportBtn.addEventListener('click', async () => {
-  if (!socketMesh) generateSocket();
+  if (!socketMesh) await generateSocket();
   if (!socketMesh) return;
   const stl = geometryToStl(socketMesh);
   if (window.socketAI?.saveStl) {
