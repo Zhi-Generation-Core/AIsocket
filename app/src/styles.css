@@ -175,6 +175,59 @@ small,
   margin-bottom: 12px;
 }
 
+.case-summary {
+  line-height: 1.45;
+}
+
+.case-context {
+  display: grid;
+  gap: 9px;
+  margin-top: 8px;
+}
+
+.case-field {
+  display: grid;
+  gap: 5px;
+}
+
+.case-field span:first-child {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.case-field select,
+.case-field input {
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fbfcfb;
+  outline: none;
+}
+
+.case-field select:focus,
+.case-field input:focus {
+  border-color: rgba(15, 118, 110, 0.55);
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);
+}
+
+.case-input-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 7px;
+  align-items: center;
+}
+
+.case-input-row em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+}
+
 .workflow-card {
   display: grid;
   gap: 8px;

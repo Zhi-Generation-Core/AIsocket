@@ -20,7 +20,32 @@
         <div class="case-card">
           <span class="eyebrow">当前病例</span>
           <strong contenteditable="true" spellcheck="false">张某 · 右下肢截肢</strong>
-          <small contenteditable="true" spellcheck="false">K3 活动等级 · 初次建模</small>
+          <small id="caseMeta" class="case-summary">K3 活动等级 · 70 kg · 中等软组织</small>
+          <div class="case-context" aria-label="患者画像参数">
+            <label class="case-field" for="caseActivity">
+              <span>活动等级</span>
+              <select id="caseActivity">
+                <option value="K2">K2 · 室内/低活动</option>
+                <option value="K3" selected>K3 · 社区活动</option>
+                <option value="K4">K4 · 高活动</option>
+              </select>
+            </label>
+            <label class="case-field" for="caseWeight">
+              <span>体重</span>
+              <span class="case-input-row">
+                <input id="caseWeight" type="number" min="35" max="140" step="1" value="70" />
+                <em>kg</em>
+              </span>
+            </label>
+            <label class="case-field" for="caseTissue">
+              <span>软组织状态</span>
+              <select id="caseTissue">
+                <option value="firm">紧实</option>
+                <option value="balanced" selected>中等</option>
+                <option value="fleshy">松软</option>
+              </select>
+            </label>
+          </div>
         </div>
 
         <section class="workflow-card" aria-live="polite">
@@ -246,6 +271,7 @@
                 <div><span>打印预检</span><strong id="printMetric">--</strong></div>
               </div>
               <button id="exportBtn" class="secondary-button">导出接受腔 STL</button>
+              <button id="reportBtn" class="secondary-button">导出复诊报告</button>
             </section>
           </div>
         </div>
@@ -260,6 +286,6 @@
         }
       }
     </script>
-    <script type="module" src="./renderer.js?v=hybrid-b-20260609"></script>
+    <script type="module" src="./renderer.js?v=case-context-20260610"></script>
   </body>
 </html>

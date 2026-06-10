@@ -41,3 +41,15 @@ ipcMain.handle('save-stl', async (_event, stlText) => {
   fs.writeFileSync(result.filePath, stlText, 'utf8');
   return { canceled: false, filePath: result.filePath };
 });
+
+ipcMain.handle('save-html-report', async (_event, htmlText) => {
+  const result = await dialog.showSaveDialog({
+    title: '导出复诊报告',
+    defaultPath: `socket_followup_report_${new Date().toISOString().slice(0, 10)}.html`,
+    filters: [{ name: 'HTML Report', extensions: ['html'] }]
+  });
+
+  if (result.canceled || !result.filePath) return { canceled: true };
+  fs.writeFileSync(result.filePath, htmlText, 'utf8');
+  return { canceled: false, filePath: result.filePath };
+});

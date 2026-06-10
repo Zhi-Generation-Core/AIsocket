@@ -15,6 +15,11 @@ const sampleBtn = document.querySelector('#sampleBtn');
 const generateBtn = document.querySelector('#generateBtn');
 const geminiBtn = document.querySelector('#geminiBtn');
 const exportBtn = document.querySelector('#exportBtn');
+const reportBtn = document.querySelector('#reportBtn');
+const caseActivity = document.querySelector('#caseActivity');
+const caseWeight = document.querySelector('#caseWeight');
+const caseTissue = document.querySelector('#caseTissue');
+const caseMeta = document.querySelector('#caseMeta');
 const recommendations = document.querySelector('#recommendations');
 const semanticTags = document.querySelector('#semanticTags');
 const versionDelta = document.querySelector('#versionDelta');
@@ -150,6 +155,14 @@ let paintUndoStack = [];
 let completedWorkflowSteps = new Set();
 let anatomyPrior = null;
 let pressureFeedback = null;
+let parameterUpdateTimer = null;
+let patientContextTimer = null;
+let lastStlExportPath = null;
+let patientProfile = {
+  activityLevel: 'K3',
+  bodyWeightKg: 70,
+  tissueFirmness: 'balanced'
+};
 
 const sectionPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
 const brushCursor = new THREE.Mesh(
@@ -1404,10 +1417,20 @@ function semanticActionEstimate(labelId) {
   };
 }
 
+function readPatientProfileFromControls() {
+  const activityOptions = ['K2', 'K3', 'K4'];
+  const tissueOptions = ['firm', 'balanced', 'fleshy'];
+  const activityLevel = activityOptions.includes(caseActivity?.value) ? caseActivity.value : 'K3';
+  const weightText = String(caseWeight?.value || '').trim();
+  const parsedWeight = Number(weightText);
+  const bodyWeightKg = Math.round(clamp(weightText && Number.isFinite(parsedWeight) ? parsedWeight : patientProfile.bodyWeightKg, 35, 140));
+  const tissueFirmness = tissueOptions.includes(caseTissue?.value) ? caseTissue.value : 'balanced';
+  patientProfile = { activityLevel, bodyWeightKg, tissueFirmness };
+  return patientProfile;
+}
+
 function patientContext() {
-  const activityLevel = 'K3';
-  const bodyWeightKg = 70;
-  const tissueFirmness = 'balanced';
+  const { activityLevel, bodyWeightKg, tissueFirmness } = readPatientProfileFromControls();
   const weightLoad = clamp((bodyWeightKg - 65) / 45, -0.35, 0.9);
   const activityMap = {
     K2: { stability: 0.82, containment: 0.2, proximal: 0.88 },
@@ -2758,6 +2781,59 @@ function updateOutputs() {
   if (outputs.brushStrength) outputs.brushStrength.textContent = `${brushStrengthMm().toFixed(1)} mm`;
 }
 
+function scheduleParameterGeometryUpdate() {
+  if (!socketMesh) return;
+  window.clearTimeout(parameterUpdateTimer);
+  parameterUpdateTimer = window.setTimeout(() => {
+    const iteration = pressureFeedback?.applied ? pressureFeedback.iteration : 0;
+    pressureFeedback = estimateCurrentPressure(iteration);
+    if (pressureFeedback) {
+      pressureFeedback.applied = iteration > 0;
+      currentRiskZones = pressureZonesForHeatmap(pressureFeedback, semanticLabelNames());
+    }
+    refreshSocketGeometry();
+    renderHybridSummary();
+  }, 180);
+}
+
+function syncCaseSummary() {
+  if (!caseMeta) return;
+  const patient = patientContext();
+  caseMeta.textContent = `${patient.activityLevel} 活动等级 · ${patient.bodyWeightKg} kg · ${tissueLabel(patient.tissueFirmness)}软组织`;
+}
+
+function normalizeCaseWeightInput() {
+  if (!caseWeight) return;
+  caseWeight.value = String(patientContext().bodyWeightKg);
+  syncCaseSummary();
+}
+
+function schedulePatientContextUpdate({ normalizeWeight = false } = {}) {
+  syncCaseSummary();
+  window.clearTimeout(patientContextTimer);
+  patientContextTimer = window.setTimeout(() => {
+    const patient = patientContext();
+    if (normalizeWeight && caseWeight && Number(caseWeight.value) !== patient.bodyWeightKg) {
+      caseWeight.value = String(patient.bodyWeightKg);
+      syncCaseSummary();
+    }
+    if (!modelProfile || !semanticMap) return;
+
+    anatomyPrior = fitOpenLimbPrior(modelProfile, semanticMap, patient);
+    if (socketMesh) {
+      const iteration = pressureFeedback?.applied ? pressureFeedback.iteration : 0;
+      pressureFeedback = estimateCurrentPressure(iteration);
+      if (pressureFeedback) {
+        pressureFeedback.applied = iteration > 0;
+        currentRiskZones = pressureZonesForHeatmap(pressureFeedback, semanticLabelNames());
+      }
+      refreshSocketGeometry();
+      hint.textContent = '病例参数已更新：活动等级、体重和软组织状态会影响当前接受腔几何与后续生成。';
+    }
+    renderHybridSummary();
+  }, 180);
+}
+
 function syncUserAvatar() {
   if (!userName || !userAvatar) return;
   const firstChar = Array.from(userName.textContent.trim()).find((char) => char.trim());
@@ -3478,6 +3554,231 @@ function geometryToStl(mesh) {
   return stl;
 }
 
+async function exportFollowupReport() {
+  if (!modelProfile) loadSample();
+  if (!socketMesh) await generateSocket();
+  if (!socketMesh || !metrics) return;
+
+  const html = buildFollowupReportHtml();
+  if (window.socketAI?.saveHtmlReport) {
+    const result = await window.socketAI.saveHtmlReport(html);
+    if (result.canceled) return;
+    hint.textContent = `复诊报告已导出：${result.filePath}`;
+  } else {
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `socket_followup_report_${new Date().toISOString().slice(0, 10)}.html`;
+    link.click();
+    URL.revokeObjectURL(url);
+    hint.textContent = '复诊报告已生成。';
+  }
+  setInspectorPane('manufacture');
+}
+
+function buildFollowupReportHtml() {
+  const patient = patientContext();
+  const latest = selectedVersion();
+  const reportTime = new Date().toLocaleString('zh-CN');
+  const imageDataUrl = renderer.domElement.toDataURL('image/png');
+  const highLabels = semanticMap?.summary
+    ?.filter((entry) => entry.severity === 'high')
+    .map((entry) => SEMANTIC_LABELS[entry.id]?.short || entry.id)
+    .slice(0, 4)
+    .join('、') || '暂无高风险标签';
+  const risks = sortedReportRisks();
+  const pressure = pressureFeedback;
+  const status = reportDesignStatus();
+  const gemini = geminiRefinement;
+  const geminiCorrections = gemini?.parameterCorrections;
+  const versionRows = socketVersions.slice(-6).reverse().map((version) => `
+    <tr>
+      <td>${escapeHtml(version.id)}</td>
+      <td>${escapeHtml(version.source)}</td>
+      <td>${escapeHtml(version.createdAt)}</td>
+      <td>${escapeHtml(version.delta ? `包容 ${signed(version.delta.offsetMm)} mm；减压 ${signed(version.delta.reliefMm)} mm；末端 ${signed(version.delta.distalMm)} mm` : '基线版本')}</td>
+      <td>${escapeHtml(reportPressureSummary(version.pressureFeedback))}</td>
+    </tr>
+  `).join('');
+  const riskCards = risks.slice(0, 3).map((zone, index) => `
+    <div class="risk-card ${escapeHtml(zone.severity)}">
+      <span>P${index + 1} · ${escapeHtml(riskLabel(zone.severity))}</span>
+      <strong>${escapeHtml(zone.label)}</strong>
+      <small>${escapeHtml(compactRiskReason(zone))} · ${escapeHtml(riskTaskAction(zone, pressure))}</small>
+    </div>
+  `).join('');
+  const geminiRiskRows = (gemini?.riskZones || []).slice(0, 6).map((zone) => `
+    <li><strong>${escapeHtml(zone.label)} · ${escapeHtml(riskLabel(zone.severity))}</strong><br>${escapeHtml(zone.reason)}</li>
+  `).join('');
+  const geminiNotes = (gemini?.clinicalNotes || []).map((note) => `<li>${escapeHtml(note)}</li>`).join('');
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>接受腔复诊报告 - ${escapeHtml(latest?.id || '未命名版本')}</title>
+  <style>
+    :root { color-scheme: light; --ink:#14232b; --muted:#687174; --line:#d6e0e7; --soft:#eef6f3; --accent:#0f766e; --danger:#d94b5a; --warn:#d89718; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px; color: var(--ink); background: #eef3f7; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; }
+    .report { max-width: 1040px; margin: 0 auto; display: grid; gap: 18px; }
+    .cover, section { background: #fff; border: 1px solid var(--line); border-radius: 18px; padding: 22px; }
+    .cover { background: linear-gradient(135deg, #f8fbfa, #eaf4f1); }
+    .eyebrow { color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { margin-top: 8px; font-size: 30px; }
+    h2 { margin-bottom: 14px; font-size: 18px; }
+    p { color: var(--muted); line-height: 1.65; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .metric { padding: 12px; border-radius: 12px; background: #f7faf9; border: 1px solid #edf1ef; }
+    .metric span { display: block; color: var(--muted); font-size: 12px; }
+    .metric strong { display: block; margin-top: 5px; font-size: 15px; }
+    .two-col { display: grid; grid-template-columns: 1.1fr .9fr; gap: 16px; align-items: start; }
+    .shot { width: 100%; border: 1px solid var(--line); border-radius: 14px; background: #f7faf9; }
+    .risk-list { display: grid; gap: 10px; }
+    .risk-card { padding: 12px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 12px; background: #fbfdfc; }
+    .risk-card.high { border-left-color: var(--danger); background: #fff8f8; }
+    .risk-card.medium { border-left-color: var(--warn); background: #fffbef; }
+    .risk-card span, small { color: var(--muted); font-size: 12px; }
+    .risk-card strong { display: block; margin: 4px 0; }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 12px; }
+    th, td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }
+    th { color: var(--muted); background: #f7faf9; }
+    ul { margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.65; }
+    .statement { border-left: 4px solid var(--accent); background: #f8fbfa; }
+    @media print { body { background: white; padding: 0; } .report { max-width: none; } section, .cover { break-inside: avoid; } }
+  </style>
+</head>
+<body>
+  <main class="report">
+    <div class="cover">
+      <span class="eyebrow">Socket AI Follow-up Report</span>
+      <h1>接受腔复诊报告</h1>
+      <p>报告时间：${escapeHtml(reportTime)} · 设计版本：${escapeHtml(latest?.id || '未生成版本')} · 当前状态：${escapeHtml(status)}</p>
+      <div class="grid" style="margin-top:16px">
+        <div class="metric"><span>患者侧别</span><strong>右下肢</strong></div>
+        <div class="metric"><span>活动等级</span><strong>${escapeHtml(patient.activityLevel)}</strong></div>
+        <div class="metric"><span>体重</span><strong>${patient.bodyWeightKg} kg</strong></div>
+        <div class="metric"><span>软组织状态</span><strong>${escapeHtml(tissueLabel(patient.tissueFirmness))}</strong></div>
+      </div>
+    </div>
+
+    <section>
+      <h2>模型摘要</h2>
+      <div class="two-col">
+        <div class="grid">
+          <div class="metric"><span>扫描高度</span><strong>${Math.round(metrics.height * 1000)} mm</strong></div>
+          <div class="metric"><span>最大围度</span><strong>${Math.round(metrics.circumference * 1000)} mm</strong></div>
+          <div class="metric"><span>最大半径</span><strong>${Math.round(metrics.maxRadius * 1000)} mm</strong></div>
+          <div class="metric"><span>语义识别</span><strong>${semanticMap?.labelCount || 0} 类</strong></div>
+          <div class="metric" style="grid-column:1/-1"><span>主要高风险标签</span><strong>${escapeHtml(highLabels)}</strong></div>
+        </div>
+        <img class="shot" alt="当前 3D 设计截图" src="${imageDataUrl}">
+      </div>
+    </section>
+
+    <section>
+      <h2>接受腔参数</h2>
+      <div class="grid">
+        <div class="metric"><span>整体包容量</span><strong>${Number(controls.offset.value).toFixed(1)} mm</strong></div>
+        <div class="metric"><span>修边高度</span><strong>${controls.trim.value}%</strong></div>
+        <div class="metric"><span>胫骨前缘减压</span><strong>${Number(controls.relief.value).toFixed(1)} mm</strong></div>
+        <div class="metric"><span>末端包容</span><strong>${Number(controls.distal.value).toFixed(1)} mm</strong></div>
+        <div class="metric"><span>打印壁厚</span><strong>${outputs.wall?.textContent || '3.5 mm'}</strong></div>
+        <div class="metric"><span>制造状态</span><strong>${escapeHtml(lastStlExportPath ? 'STL 已导出' : 'STL 未导出')}</strong></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>AI 建议摘要</h2>
+      <div class="grid">
+        <div class="metric"><span>当前风险等级</span><strong>${escapeHtml(riskLabel(reportSeverity(risks)))}</strong></div>
+        <div class="metric"><span>下一步动作</span><strong>${escapeHtml(pressure?.applied ? '人工复核' : '运行优化')}</strong></div>
+        <div class="metric"><span>压力峰值</span><strong>${escapeHtml(reportPressurePeak(pressure))}</strong></div>
+        <div class="metric"><span>风险点变化</span><strong>${escapeHtml(reportRiskCount(pressure))}</strong></div>
+      </div>
+      <div class="risk-list" style="margin-top:14px">${riskCards || '<p>当前没有需要优先处理的风险任务。</p>'}</div>
+    </section>
+
+    <section>
+      <h2>Gemini 复核记录</h2>
+      ${gemini ? `
+        <div class="metric"><span>参数校正</span><strong>包容量 ${signed(geminiCorrections.offsetDeltaMm)} mm；修边 ${signed(geminiCorrections.trimDeltaPercent)}%；减压 ${signed(geminiCorrections.reliefDeltaMm)} mm；末端 ${signed(geminiCorrections.distalDeltaMm)} mm。</strong></div>
+        <h3 style="margin:14px 0 8px">风险区摘要</h3>
+        <ul>${geminiRiskRows || '<li>暂无额外风险区。</li>'}</ul>
+        <h3 style="margin:14px 0 8px">复核建议</h3>
+        <ul>${geminiNotes || '<li>暂无额外临床备注。</li>'}</ul>
+      ` : '<p>尚未执行 Gemini 复核；医生可基于当前 AI 建议与版本记录进行人工复核。</p>'}
+    </section>
+
+    <section>
+      <h2>版本变化</h2>
+      <table>
+        <thead><tr><th>版本</th><th>来源</th><th>时间</th><th>参数 Delta</th><th>风险变化</th></tr></thead>
+        <tbody>${versionRows || '<tr><td colspan="5">暂无版本记录。</td></tr>'}</tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>STL / 制造状态</h2>
+      <div class="grid">
+        <div class="metric"><span>STL 导出</span><strong>${escapeHtml(lastStlExportPath || '未导出')}</strong></div>
+        <div class="metric"><span>打印预检</span><strong>${escapeHtml(outputs.print?.textContent || '--')}</strong></div>
+        <div class="metric"><span>壁厚建议</span><strong>${escapeHtml(outputs.wall?.textContent || '3.5 mm')}</strong></div>
+        <div class="metric"><span>注意事项</span><strong>试穿后复核压力区</strong></div>
+      </div>
+    </section>
+
+    <section class="statement">
+      <h2>临床声明</h2>
+      <p>本报告为研究原型生成的设计复核材料，不构成临床诊断或最终处方。接受腔制作需由持证假肢师结合触诊、试穿反馈与临床评估确认。</p>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function sortedReportRisks() {
+  const severityOrder = { high: 3, medium: 2, low: 1 };
+  return [...currentRiskZones].sort((a, b) => {
+    const severityDelta = severityOrder[b.severity] - severityOrder[a.severity];
+    if (severityDelta) return severityDelta;
+    return pressureValueFromZone(b) - pressureValueFromZone(a);
+  });
+}
+
+function reportSeverity(risks) {
+  if (risks.some((zone) => zone.severity === 'high')) return 'high';
+  if (risks.some((zone) => zone.severity === 'medium')) return 'medium';
+  return 'low';
+}
+
+function reportPressurePeak(pressure) {
+  if (!pressure) return '--';
+  const baseline = pressure.baselinePeakKpa ?? pressure.peakKpa;
+  return `${Number(baseline).toFixed(1)} → ${Number(pressure.peakKpa).toFixed(1)} kPa`;
+}
+
+function reportRiskCount(pressure) {
+  if (!pressure) return '--';
+  const baseline = pressure.baselineHighCount ?? pressure.highCount;
+  return `${baseline} → ${pressure.highCount}`;
+}
+
+function reportPressureSummary(pressure) {
+  if (!pressure) return '--';
+  return `峰值 ${pressure.peakKpa} kPa；高风险 ${pressure.highCount}`;
+}
+
+function reportDesignStatus() {
+  if (lastStlExportPath) return '可导出 / 已生成制造文件';
+  if (geminiRefinement || pressureFeedback?.applied) return '已优化，建议人工复核';
+  if (socketMesh) return '待复核';
+  return '待生成';
+}
+
 fileInput.addEventListener('change', (event) => {
   const file = event.target.files?.[0];
   if (file) importModel(file);
@@ -3494,6 +3795,7 @@ exportBtn.addEventListener('click', async () => {
   if (window.socketAI?.saveStl) {
     const result = await window.socketAI.saveStl(stl);
     if (result.canceled) return;
+    lastStlExportPath = result.filePath || '已导出';
   } else {
     const blob = new Blob([stl], { type: 'model/stl' });
     const url = URL.createObjectURL(blob);
@@ -3502,17 +3804,32 @@ exportBtn.addEventListener('click', async () => {
     link.download = 'socket_ai_initial.stl';
     link.click();
     URL.revokeObjectURL(url);
+    lastStlExportPath = '浏览器下载';
   }
   activateStep('export', { complete: ['scan', 'landmarks', 'ai', 'edit', 'export'] });
   setInspectorPane('manufacture');
   outputs.print.textContent = '已导出';
 });
+reportBtn?.addEventListener('click', exportFollowupReport);
 
 resetViewBtn?.addEventListener('click', resetView);
 fitViewBtn?.addEventListener('click', fitViewToModel);
 undoPaintBtn?.addEventListener('click', undoPaintStep);
 addVersionBtn?.addEventListener('click', addManualVersion);
 deleteVersionBtn?.addEventListener('click', deleteSelectedVersion);
+[caseActivity, caseTissue].forEach((control) => {
+  control?.addEventListener('change', schedulePatientContextUpdate);
+});
+caseWeight?.addEventListener('input', schedulePatientContextUpdate);
+caseWeight?.addEventListener('change', () => schedulePatientContextUpdate({ normalizeWeight: true }));
+caseWeight?.addEventListener('blur', normalizeCaseWeightInput);
+caseWeight?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    normalizeCaseWeightInput();
+    caseWeight.blur();
+  }
+});
+syncCaseSummary();
 sectionHeight?.addEventListener('input', () => {
   applySectionClipping();
 });
@@ -3525,16 +3842,7 @@ controls.brushStrength?.addEventListener('input', () => {
   controls[key].addEventListener('input', () => {
     if (key === 'trim') controls.trim.dataset.userChanged = 'true';
     updateOutputs();
-    if (socketMesh) {
-      const iteration = pressureFeedback?.applied ? pressureFeedback.iteration : 0;
-      pressureFeedback = estimateCurrentPressure(iteration);
-      if (pressureFeedback) {
-        pressureFeedback.applied = iteration > 0;
-        currentRiskZones = pressureZonesForHeatmap(pressureFeedback, semanticLabelNames());
-      }
-      refreshSocketGeometry();
-      renderHybridSummary();
-    }
+    scheduleParameterGeometryUpdate();
   });
 });
 
