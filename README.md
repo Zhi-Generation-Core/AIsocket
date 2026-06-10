@@ -1,5 +1,8 @@
 # Socket AI Designer Demo
 
+> **pyz 分支扩展说明**：本仓库已包含完整 SocketAI 平台（后端、移动端、部署配置）。  
+> **网页目录 `web/` 为旧版部署快照**，前端开发请以 **`app/src/`** 为准。详见 [PYz_BRANCH_NOTES.md](./PYz_BRANCH_NOTES.md) 与 [DEPLOY.md](./DEPLOY.md)。
+
 面向假肢接受腔设计流程的 AI 辅助原型演示。项目将 3D 残肢模型导入、语义风险区标注、参数化接受腔生成、局部减压编辑、Gemini 复核和 STL 导出整合到一个可交互界面中，适合用于数字创意、临床设计流程展示和课堂 Demo。
 
 > 注意：本项目仅用于教学和原型展示，不构成医疗诊断、处方或临床制造建议。真实接受腔设计必须由具备资质的专业人员结合患者情况完成评估。
@@ -27,18 +30,17 @@
 
 ```text
 .
-├── app/
+├── app/                    # Electron + Three.js 设计台（前端源码，权威）
 │   ├── package.json
 │   └── src/
-│       ├── index.html
-│       ├── main.js
-│       ├── preload.js
-│       ├── renderer.js
-│       ├── start-launcher.js
-│       └── styles.css
+├── backend/                # Node.js API + PostgreSQL
+├── web/                    # ⚠️ 旧版 Web 静态部署快照（非开发入口）
+├── mobile/                 # Expo Android 患者端
+├── deploy/                 # Nginx 等
 ├── 模型文件/
-│   └── *.obj
 ├── launcher.py
+├── PYz_BRANCH_NOTES.md     # pyz 分支上传与 web 旧版说明
+├── DEPLOY.md               # 线上部署与 API
 ├── SocketAI-Designer-Demo.spec
 └── 残肢模型example.stl
 ```

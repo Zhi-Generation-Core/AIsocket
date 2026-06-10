@@ -19,7 +19,7 @@
   },
   "build": {
     "appId": "edu.zju.socket-ai-designer",
-    "productName": "接受腔 AI 设计台 Demo",
+    "productName": "接受腔AI设计台Demo",
     "files": [
       "src/**/*",
       "assets/**/*",
