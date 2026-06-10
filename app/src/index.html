@@ -85,6 +85,17 @@
 
         <section class="stage">
           <div id="viewer" class="viewer"></div>
+          <div id="importProgress" class="import-progress" hidden>
+            <div class="import-progress-card">
+              <span id="importProgressEyebrow" class="eyebrow">模型导入</span>
+              <strong id="importProgressTitle">正在准备模型</strong>
+              <p id="importProgressText">读取文件并初始化几何解析。</p>
+              <div class="import-progress-track">
+                <span id="importProgressBar"></span>
+              </div>
+              <small id="importProgressPercent">0%</small>
+            </div>
+          </div>
           <div class="viewer-toolbar" aria-label="模型显示控制">
             <button id="viewBoth" class="tool icon-tool active" type="button" aria-label="显示残肢和接受腔" title="显示残肢和接受腔" data-tooltip="残肢 + 接受腔"><span aria-hidden="true">◐</span></button>
             <button id="viewSocket" class="tool icon-tool" type="button" aria-label="仅显示接受腔" title="仅显示接受腔" data-tooltip="仅接受腔"><span aria-hidden="true">◯</span></button>
@@ -124,6 +135,12 @@
               <div id="recommendations" class="recommendations">
                 <div class="empty">导入或使用示例残肢后，AI 会根据几何尺寸和活动等级生成接受腔初版。</div>
               </div>
+              <div class="advice-review">
+                <div id="geminiResult" class="gemini-result">
+                  <span class="eyebrow">大模型复核</span>
+                  <div class="empty">生成初版后，可调用 Gemini 分析参数和预览图，返回结构化校正结果。</div>
+                </div>
+              </div>
             </section>
 
             <section class="panel">
@@ -135,13 +152,6 @@
               </div>
               <div id="semanticTags" class="semantic-tags">
                 <div class="empty">导入残肢模型后，系统会自动完成语义标签分割。</div>
-              </div>
-            </section>
-
-            <section class="panel compact">
-              <div id="geminiResult" class="gemini-result">
-                <span class="eyebrow">大模型复核</span>
-                <div class="empty">生成初版后，可调用 Gemini 分析参数和预览图，返回结构化校正结果。</div>
               </div>
             </section>
 

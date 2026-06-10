@@ -40,6 +40,12 @@ const undoPaintBtn = document.querySelector('#undoPaintBtn');
 const pressureOptimizeBtn = document.querySelector('#pressureOptimizeBtn');
 const hybridState = document.querySelector('#hybridState');
 const hybridSummary = document.querySelector('#hybridSummary');
+const importProgress = document.querySelector('#importProgress');
+const importProgressEyebrow = document.querySelector('#importProgressEyebrow');
+const importProgressTitle = document.querySelector('#importProgressTitle');
+const importProgressText = document.querySelector('#importProgressText');
+const importProgressBar = document.querySelector('#importProgressBar');
+const importProgressPercent = document.querySelector('#importProgressPercent');
 
 const controls = {
   offset: document.querySelector('#offset'),
@@ -1820,15 +1826,19 @@ function calculateMetrics(profile) {
   };
 }
 
-function generateSocket() {
+async function generateSocket() {
   if (!modelProfile) loadSample();
   setAiState('分析中');
   activateStep('ai');
   clearPaintMarkers();
   pressureFeedback = null;
+  await updateTaskProgress('算法生成', 10, '准备生成接受腔', '正在读取残肢轮廓和语义标签。');
+  await updateTaskProgress('算法生成', 32, '拟合设计参数', '正在计算包容量、修边高度和局部减压。');
 
-  window.setTimeout(() => {
+  window.setTimeout(async () => {
+    showTaskProgress('算法生成', 58, '生成几何', '正在构建接受腔曲面网格。');
     const geometry = createSocketGeometry();
+    await updateTaskProgress('算法生成', 74, '应用预览材质', '正在更新透明外壳和线框视图。');
     if (socketMesh) scene.remove(socketMesh);
     if (wireMesh) scene.remove(wireMesh);
     socketMesh = new THREE.Mesh(geometry, socketMaterial);
@@ -1838,6 +1848,7 @@ function generateSocket() {
     wireMesh.renderOrder = 3;
     wireMesh.visible = controls.wireToggle.checked;
     scene.add(socketMesh, wireMesh);
+    await updateTaskProgress('算法生成', 88, '评估初始风险', '正在建立压力参考和优先风险区。');
     pressureFeedback = estimateCurrentPressure(0);
     currentRiskZones = pressureZonesForHeatmap(pressureFeedback, semanticLabelNames());
     clearPaintUndoStack();
@@ -1850,6 +1861,8 @@ function generateSocket() {
     renderHybridSummary();
     activateStep('ai', { complete: ['scan', 'landmarks'], uncomplete: ['ai', 'edit', 'export'] });
     hint.textContent = 'AI 初版已生成。打开“局部减压画笔”后，在接受腔表面点击可添加局部外扩修形。';
+    await updateTaskProgress('算法生成', 100, '生成完成', '接受腔初版已生成，建议区已更新。');
+    window.setTimeout(hideTaskProgress, 650);
   }, 420);
 }
 
@@ -2600,14 +2613,20 @@ function updateRecommendations() {
     ? `${baselinePeak.toFixed(1)} → ${pressure.peakKpa.toFixed(1)} kPa`
     : '等待生成压力评估';
   const nextAction = pressureNextAction(pressure);
+  const consoleState = pressure?.applied ? '已优化' : pressure ? '待优化' : '待评估';
+  const reviewSummary = pressure?.applied
+    ? `已完成第 ${pressure.iteration} 次反馈优化，当前重点是复核优先风险区与悬吊稳定性。`
+    : '当前方案已完成初步评估，建议先运行压力反馈优化，再进入人工复核。';
+  const primaryAction = pressure?.applied ? '人工复核' : '运行优化';
   const topRiskCards = topRisks.map((zone, index) => `
     <article class="priority-risk ${zone.severity}">
       <span class="risk-rank">${index + 1}</span>
       <span class="risk-copy">
+        <small>任务 P${index + 1} · ${riskLabel(zone.severity)}</small>
         <strong>${escapeHtml(zone.label)}</strong>
-        <small>${escapeHtml(zone.reason)}</small>
+        <small>${escapeHtml(compactRiskReason(zone))}</small>
       </span>
-      <span class="risk-value">${pressureValueFromZone(zone) ? `${pressureValueFromZone(zone).toFixed(1)} kPa` : riskLabel(zone.severity)}</span>
+      <span class="risk-value">${riskTaskAction(zone, pressure)}</span>
     </article>
   `).join('');
   const allRiskCards = remainingRisks.map((zone) => `
@@ -2619,36 +2638,30 @@ function updateRecommendations() {
 
   recommendations.innerHTML = `
     <section class="advice-summary ${referenceSeverity}">
-      <div>
-        <span class="eyebrow">参考载荷风险</span>
-        <strong>${riskLabel(referenceSeverity)}</strong>
-        <p>${nextAction}</p>
+      <div class="advice-hero">
+        <span class="copilot-badge">AI 建议</span>
+        <span class="eyebrow">设计建议总览</span>
+        <strong>${riskLabel(referenceSeverity)} · ${consoleState}</strong>
+        <p>${reviewSummary}</p>
       </div>
       <div class="advice-summary-metrics">
-        <span>设计改善状态<strong>${improvement.label}</strong></span>
-        <span>峰值变化<strong>${pressureState}${pressure?.applied ? ` ↓${peakReductionPercent.toFixed(1)}%` : ''}</strong></span>
-        <span>高风险点<strong>${pressure ? `${baselineHighCount} → ${pressure.highCount}${highRiskReduction ? ` ↓${highRiskReduction}` : ''}` : '--'}</strong></span>
-        <span>语义风险<strong>${highLabels}</strong></span>
+        <span>下一步<strong>${primaryAction}</strong></span>
+        <span>压力峰值<strong>${pressureState}${pressure?.applied ? ` ↓${peakReductionPercent.toFixed(1)}%` : ''}</strong></span>
+        <span>风险点<strong>${pressure ? `${baselineHighCount} → ${pressure.highCount}` : '--'}</strong></span>
       </div>
-    </section>
-
-    <section class="parameter-summary">
-      <div><span>整体包容量</span><strong>${offset.toFixed(1)} mm</strong></div>
-      <div><span>胫骨前缘减压</span><strong>${relief.toFixed(1)} mm</strong></div>
-      <div><span>末端包容</span><strong>${distal.toFixed(1)} mm</strong></div>
-      <small>近端修边 ${trim}% · 最大围度 ${Math.round(metrics.circumference * 1000)} mm</small>
     </section>
 
     <div class="advice-section-title">
-      <strong>优先处理风险区</strong>
+      <strong>优先任务</strong>
       <span>Top ${topRisks.length}</span>
     </div>
     <section class="priority-risks">${topRiskCards || '<div class="empty">当前没有需要优先处理的风险区。</div>'}</section>
 
     <details class="advice-details">
       <summary>查看设计依据</summary>
+      <div class="detail-row"><strong>关键参数</strong><span>包容量 ${offset.toFixed(1)} mm；胫骨前缘减压 ${relief.toFixed(1)} mm；末端包容 ${distal.toFixed(1)} mm；近端修边 ${trim}%。</span></div>
       <div class="detail-row"><strong>语义标签驱动</strong><span>识别 ${semanticMap?.labelCount || 0} 类标签；${highLabels} 等敏感区自动增加局部减压。</span></div>
-      <div class="detail-row"><strong>压力反馈</strong><span>${pressure ? `SocketSense walking 实测统计映射均值 ${pressure.meanKpa} kPa；${pressure.applied ? `已应用第 ${pressure.iteration} 次修正。` : '尚未写入反馈修正。'}` : '生成后建立压力映射。'}</span></div>
+      <div class="detail-row"><strong>压力反馈</strong><span>${pressure ? `均值 ${pressure.meanKpa} kPa；${nextAction}` : '生成后建立压力映射。'}</span></div>
       <div class="detail-row"><strong>体积守恒</strong><span>${volume ? `回收 ${volume.removedMm3} mm³，释放 ${volume.releasedMm3} mm³。` : '生成后计算体积补偿。'}</span></div>
     </details>
 
@@ -2664,6 +2677,19 @@ function updateRecommendations() {
 function pressureValueFromZone(zone) {
   const value = Number(String(zone.label || '').match(/([\d.]+)\s*kPa/)?.[1]);
   return Number.isFinite(value) ? value : 0;
+}
+
+function compactRiskReason(zone) {
+  const value = pressureValueFromZone(zone);
+  if (value) return `参考载荷 ${value.toFixed(1)} kPa`;
+  return String(zone.reason || riskLabel(zone.severity)).split('；')[0].slice(0, 28);
+}
+
+function riskTaskAction(zone, pressure) {
+  if (!pressure?.applied) return '待优化';
+  if (zone.severity === 'high') return '需复核';
+  if (zone.severity === 'medium') return '观察';
+  return '通过';
 }
 
 function pressureImprovementState(pressure, reductionPercent) {
@@ -2728,6 +2754,7 @@ function syncUserAvatar() {
 }
 
 async function refineWithGemini() {
+  setInspectorPane('advice');
   if (!socketMesh) {
     generateSocket();
     window.setTimeout(refineWithGemini, 620);
@@ -2735,25 +2762,34 @@ async function refineWithGemini() {
   }
   if (!metrics) return;
   setAiState('Gemini 复核中');
+  await updateTaskProgress('AI 复核优化', 12, '准备复核', '正在整理当前参数、几何摘要和预览图。');
   geminiResult.innerHTML = '<span class="eyebrow">大模型复核</span><div class="empty">正在把当前参数、几何摘要和3D预览交给 Gemini 分析...</div>';
 
+  await updateTaskProgress('AI 复核优化', 30, '采集预览', '正在截取当前 3D 设计视图。');
   const payload = {
     summary: buildModelSummary(),
     imageDataUrl: renderer.domElement.toDataURL('image/png')
   };
 
   try {
+    await updateTaskProgress('AI 复核优化', 46, '连接本地后端', '正在检查 Gemini 服务状态。');
     await ensureBackendReady();
+    await updateTaskProgress('AI 复核优化', 62, '提交复核请求', '正在请求 Gemini 分析参数与风险区。');
     const response = await fetch(apiUrl('/api/gemini-refine'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
+    await updateTaskProgress('AI 复核优化', 78, '解析复核结果', '正在整理参数校正与临床说明。');
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || 'Gemini request failed');
+    await updateTaskProgress('AI 复核优化', 90, '应用校正', '正在更新接受腔参数和建议区。');
     applyGeminiRefinement(data.result, data.model);
     setAiState('Gemini 已复核');
+    await updateTaskProgress('AI 复核优化', 100, '复核完成', '大模型复核意见已写入 AI 建议区。');
+    window.setTimeout(hideTaskProgress, 650);
   } catch (error) {
+    await updateTaskProgress('AI 复核优化', 72, '启用本地兜底', 'Gemini 未返回有效结果，正在使用本地规则复核。');
     const fallback = localRefinementFallback();
     applyGeminiRefinement(fallback, '本地规则兜底');
     setAiState('本地兜底');
@@ -2761,6 +2797,8 @@ async function refineWithGemini() {
       'beforeend',
       `<div class="empty">Gemini 调用未成功，已使用本地规则兜底。错误摘要：${escapeHtml(explainFetchError(error))}</div>`
     );
+    await updateTaskProgress('AI 复核优化', 100, '已完成本地兜底', '本地规则复核结果已写入 AI 建议区。', true);
+    window.setTimeout(hideTaskProgress, 1400);
   }
 }
 
@@ -2868,7 +2906,7 @@ function applyGeminiRefinement(result, modelName) {
   recordSocketVersion('Gemini 复核');
   renderGeminiResult(modelName);
   activateStep('edit', { complete: ['scan', 'landmarks', 'ai'], uncomplete: ['edit', 'export'] });
-  setInspectorPane('params');
+  setInspectorPane('advice');
   hint.textContent = 'Gemini 复核完成：参数已保守校正，风险热图已按红/黄/绿等级重新标注。';
 }
 
@@ -3099,12 +3137,15 @@ function deleteSelectedVersion() {
 async function importModel(file) {
   fileInput.disabled = true;
   hint.textContent = `正在导入 ${file.name}...`;
+  await updateImportProgress(8, '准备导入', `正在读取 ${file.name}`);
   activateStep('scan', { uncomplete: ['scan', 'landmarks', 'ai', 'edit', 'export'] });
   await new Promise((resolve) => requestAnimationFrame(resolve));
   try {
     const ext = file.name.split('.').pop().toLowerCase();
+    await updateImportProgress(24, '读取文件', '正在载入 STL/OBJ 数据。');
     const buffer = await file.arrayBuffer();
     let mesh = null;
+    await updateImportProgress(48, '解析几何', ext === 'obj' ? '正在解析 OBJ 网格结构。' : '正在解析 STL 三角面片。');
     if (ext === 'stl') {
       const geometry = new STLLoader().parse(buffer);
       mesh = new THREE.Mesh(geometry, limbMaterial);
@@ -3122,16 +3163,43 @@ async function importModel(file) {
       }
     }
     if (!mesh) throw new Error('未找到可用网格');
+    await updateImportProgress(68, '规范化模型', '正在居中、缩放并校正模型坐标。');
     const normalized = normalizeImportedMesh(mesh);
+    await updateImportProgress(84, 'AI 语义分析', '正在生成残肢轮廓和风险区标签。');
     setLimb(normalized);
+    await updateImportProgress(100, '导入完成', '模型已载入，语义标签已生成。');
     hint.textContent = `已导入 ${file.name}`;
+    window.setTimeout(hideImportProgress, 650);
   } catch (error) {
+    showImportProgress(100, '导入失败', error?.message || String(error), true);
     hint.textContent = `模型导入失败：${error?.message || error}`;
     console.error(error);
+    window.setTimeout(hideImportProgress, 1800);
   } finally {
     fileInput.disabled = false;
     fileInput.value = '';
   }
+}
+
+function showImportProgress(percent, title, text, isError = false) {
+  if (!importProgress) return;
+  importProgress.hidden = false;
+  importProgress.classList.toggle('error', isError);
+  importProgressTitle.textContent = title;
+  importProgressText.textContent = text;
+  importProgressBar.style.width = `${clamp(percent, 0, 100)}%`;
+  importProgressPercent.textContent = `${Math.round(clamp(percent, 0, 100))}%`;
+}
+
+async function updateImportProgress(percent, title, text) {
+  showImportProgress(percent, title, text);
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+function hideImportProgress() {
+  if (!importProgress) return;
+  importProgress.hidden = true;
+  importProgress.classList.remove('error');
 }
 
 function setVisibility(mode) {
