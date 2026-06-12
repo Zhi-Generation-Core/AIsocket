@@ -2,13 +2,17 @@
 
 本分支由 mugzju.top 线上 SocketAI 全栈应用同步而来，在原有 **Socket AI Designer Demo** 基础上扩展了后端、Web 部署快照、Android 患者端等模块。
 
-## 重要：网页端 `web/` 仍是旧版
+## pyz 分支说明（2026-06-10 更新）
 
-| 目录 | 状态 | 说明 |
-|------|------|------|
-| **`app/src/`** | ✅ 当前前端源码（权威） | Electron 与浏览器共用；含登录、病例工作台、3D 设计台、云端 API 对接 |
-| **`web/`** | ⚠️ **旧版部署快照** | 仅用于同步到服务器 `/var/www/socketai/` 的静态文件；**未与最新工作流完全对齐**，请勿当作开发入口 |
-| **线上** https://mugzju.top/socketai/ | 可能仍对应 `web/` 旧快照 | 更新生产环境时，应从 `app/src/` 重新拷贝并部署，而不是只改 `web/` |
+本分支 = **`main` 网页端功能** + **云端后端 / 移动端**。
+
+| 来源 | 内容 |
+|------|------|
+| `origin/main` | `renderer.js`、`styles.css`、工作流 HUD、图标工具栏、右侧 Tab 面板等 |
+| `pyz` 扩展 | `backend/`、`mobile/`、`api-client.js`、`bootstrap.js`、`workflow-ui.js`、登录/病例/邀请码 |
+| `web/` | 与 `app/src/` 同步的静态部署快照（部署到 `/var/www/socketai/`） |
+
+**开发请以 `app/src/` 为准**；改完后同步到 `web/` 再 scp 到服务器。
 
 ### 更新线上 Web 的正确方式
 

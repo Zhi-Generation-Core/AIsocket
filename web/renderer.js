@@ -3,7 +3,6 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import * as socketApi from './api-client.js';
-import * as workflow from './workflow-ui.js';
 
 const viewer = document.querySelector('#viewer');
 const fileInput = document.querySelector('#fileInput');
@@ -17,17 +16,34 @@ const versionDelta = document.querySelector('#versionDelta');
 const aiState = document.querySelector('#aiState');
 const hint = document.querySelector('#hint');
 const geminiResult = document.querySelector('#geminiResult');
+const currentStepTitle = document.querySelector('#currentStepTitle');
+const currentStepNote = document.querySelector('#currentStepNote');
+const workflowProgress = document.querySelector('#workflowProgress');
+const workflowNext = document.querySelector('#workflowNext');
+const versionTimeline = document.querySelector('#versionTimeline');
+const addVersionBtn = document.querySelector('#addVersionBtn');
+const deleteVersionBtn = document.querySelector('#deleteVersionBtn');
+const userName = document.querySelector('#userName');
+const userAvatar = document.querySelector('#userAvatar');
+const interactionFeedback = document.querySelector('#interactionFeedback');
+const sectionControls = document.querySelector('#sectionControls');
+const sectionHeight = document.querySelector('#sectionHeight');
+const sectionHeightOut = document.querySelector('#sectionHeightOut');
+const resetViewBtn = document.querySelector('#resetViewBtn');
+const fitViewBtn = document.querySelector('#fitViewBtn');
+const undoPaintBtn = document.querySelector('#undoPaintBtn');
 
 const controls = {
   offset: document.querySelector('#offset'),
   trim: document.querySelector('#trim'),
   relief: document.querySelector('#relief'),
   distal: document.querySelector('#distal'),
+  brushStrength: document.querySelector('#brushStrength'),
   activityLevel: document.querySelector('#activityLevel'),
   bodyWeight: document.querySelector('#bodyWeight'),
   tissueFirmness: document.querySelector('#tissueFirmness'),
   semanticToggle: document.querySelector('#semanticToggle'),
-  heatToggle: document.querySelector('#heatToggle'),
+  heatToggle: document.querySelector('#heatToggle') || { checked: false, addEventListener: () => {} },
   wireToggle: document.querySelector('#wireToggle')
 };
 
@@ -36,6 +52,7 @@ const outputs = {
   trim: document.querySelector('#trimOut'),
   relief: document.querySelector('#reliefOut'),
   distal: document.querySelector('#distalOut'),
+  brushStrength: document.querySelector('#brushStrengthOut'),
   weight: document.querySelector('#weightOut'),
   height: document.querySelector('#heightMetric'),
   circ: document.querySelector('#circMetric'),
@@ -74,7 +91,8 @@ const limbMaterial = new THREE.MeshStandardMaterial({
   color: 0xffffff,
   vertexColors: true,
   roughness: 0.72,
-  metalness: 0.02
+  metalness: 0.02,
+  side: THREE.DoubleSide
 });
 const socketMaterial = new THREE.MeshPhysicalMaterial({
   color: 0xffffff,
@@ -84,18 +102,20 @@ const socketMaterial = new THREE.MeshPhysicalMaterial({
   roughness: 0.38,
   metalness: 0.0,
   side: THREE.DoubleSide,
-  depthWrite: true
+  depthWrite: false
 });
 const wireMaterial = new THREE.MeshBasicMaterial({
   color: 0x184f47,
   wireframe: true,
   transparent: true,
-  opacity: 0.28
+  opacity: 0.28,
+  depthWrite: false
 });
 const heatMaterial = new THREE.MeshBasicMaterial({
   color: 0xd96d3a,
   transparent: true,
   opacity: 0.58,
+  side: THREE.DoubleSide,
   depthWrite: false
 });
 
@@ -112,16 +132,76 @@ let currentRiskZones = [];
 let semanticMap = null;
 let currentGenerationMeta = null;
 let socketVersions = [];
+let selectedVersionId = null;
+let nextVersionNumber = 1;
 let geminiRefinement = null;
+let currentViewMode = 'both';
+let paintUndoStack = [];
+let completedWorkflowSteps = new Set();
 let latestServerVersionId = null;
 let sessionInfo = null;
 let workspaceInitialized = false;
 
-scene.add(heatGroup, markerGroup);
+const sectionPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
+const brushCursor = new THREE.Mesh(
+  new THREE.TorusGeometry(0.055, 0.0012, 8, 72),
+  new THREE.MeshBasicMaterial({
+    color: 0xd96d3a,
+    transparent: true,
+    opacity: 0.86,
+    depthWrite: false
+  })
+);
+brushCursor.visible = false;
+brushCursor.renderOrder = 5;
+
+scene.add(heatGroup, markerGroup, brushCursor);
 
 const PROFILE_SLICES = 72;
 const PROFILE_SEGMENTS = 128;
 const MIN_SECTION_RADIUS = 0.006;
+const WORKFLOW_STEPS = [
+  {
+    id: 'scan',
+    title: '导入扫描',
+    note: '导入 STL/OBJ 或使用示例残肢，建立设计起点。',
+    next: '下一步：识别解剖点与风险区。',
+    progress: 20,
+    pane: 'advice'
+  },
+  {
+    id: 'landmarks',
+    title: '识别解剖点',
+    note: '检查语义标签、敏感区和承重区，确认 AI 对残肢区域的理解。',
+    next: '下一步：生成 AI 初始参数建议。',
+    progress: 40,
+    pane: 'advice'
+  },
+  {
+    id: 'ai',
+    title: 'AI 参数建议',
+    note: '根据几何、活动等级和软组织状态生成接受腔初版。',
+    next: '下一步：进入参数与画笔精修。',
+    progress: 60,
+    pane: 'advice'
+  },
+  {
+    id: 'edit',
+    title: '手动精修',
+    note: '调整包容量、修边高度、减压幅度，或用画笔做局部外扩。',
+    next: '下一步：检查制造指标并导出。',
+    progress: 80,
+    pane: 'params'
+  },
+  {
+    id: 'export',
+    title: '制造输出',
+    note: '复核体积 Delta、壁厚和打印预检，导出接受腔 STL。',
+    next: '当前流程已到制造输出阶段。',
+    progress: 100,
+    pane: 'manufacture'
+  }
+];
 
 const SEMANTIC_LABELS = {
   anterior_tibia: {
@@ -311,7 +391,7 @@ function createRevolvedGeometry(profile, segments = 96) {
   return geometry;
 }
 
-function createSectionedGeometry(profile, segments = PROFILE_SEGMENTS) {
+function createSectionedGeometry(profile, segments = PROFILE_SEGMENTS, options = {}) {
   const positions = [];
   const indices = [];
   const radialData = [];
@@ -333,6 +413,44 @@ function createSectionedGeometry(profile, segments = PROFILE_SEGMENTS) {
       const a = i * row + j;
       const b = a + row;
       indices.push(a, b, a + 1, b, b + 1, a + 1);
+    }
+  }
+
+  if (options.closeDistal && profile.length > 0) {
+    const distal = profile[0];
+    const centerX = distal.centerX || 0;
+    const centerZ = distal.centerZ || 0;
+    const distalRadii = Array.from({ length: segments }, (_value, j) => radiusAt(distal, j, segments));
+    const averageRadius = distalRadii.reduce((sum, radius) => sum + radius, 0) / Math.max(1, distalRadii.length);
+    const cupDepth = Math.min(0.018, Math.max(0.007, averageRadius * 0.22));
+    const cupRings = [
+      { y: distal.y - cupDepth * 0.25, scale: 0.88 },
+      { y: distal.y - cupDepth * 0.55, scale: 0.62 },
+      { y: distal.y - cupDepth * 0.82, scale: 0.34 }
+    ];
+    let previousStart = 0;
+
+    cupRings.forEach((ring) => {
+      const ringStart = positions.length / 3;
+      for (let j = 0; j <= segments; j += 1) {
+        const theta = (j / segments) * Math.PI * 2;
+        const radius = radiusAt(distal, j, segments) * ring.scale;
+        positions.push(centerX + Math.cos(theta) * radius, ring.y, centerZ + Math.sin(theta) * radius);
+        radialData.push({ y: ring.y, theta, baseRadius: radius });
+      }
+      for (let j = 0; j < segments; j += 1) {
+        const a = previousStart + j;
+        const b = ringStart + j;
+        indices.push(a + 1, b, a, a + 1, b + 1, b);
+      }
+      previousStart = ringStart;
+    });
+
+    const capIndex = positions.length / 3;
+    positions.push(centerX, distal.y - cupDepth, centerZ);
+    radialData.push({ y: distal.y - cupDepth, theta: 0, baseRadius: 0 });
+    for (let j = 0; j < segments; j += 1) {
+      indices.push(previousStart + j + 1, previousStart + j, capIndex);
     }
   }
 
@@ -1374,12 +1492,20 @@ function renderSemanticTags() {
   `;
 }
 
+function mapSourceToStatus(source) {
+  if (source.includes('Gemini') || source.includes('AI复核') || source.includes('复核')) {
+    return 'fitting_adjustment';
+  }
+  if (source.includes('导出')) return 'manufacturing_confirmed';
+  return 'ai_initial';
+}
+
 function buildVersionPayload(source, status = 'ai_initial') {
-  const latest = socketVersions.at(-1);
+  const latest = selectedVersion() || socketVersions.at(-1);
   const summary = metrics ? buildModelSummary() : null;
   return {
     label: source,
-    source: source.includes('Gemini') || source.includes('AI复核') ? 'gemini_refine' : 'algorithm',
+    source: source.includes('Gemini') || source.includes('复核') ? 'gemini_refine' : 'algorithm',
     status,
     parameters: latest?.params || {
       offsetMm: Number(controls.offset.value),
@@ -1421,23 +1547,14 @@ async function refreshCasePanelFromServer() {
   }
 }
 
-function renderCasePanel(_caseInfo, versions = []) {
-  window.dispatchEvent(new CustomEvent('socketai:versions-updated', {
-    detail: { versions },
-  }));
-}
-
-function mapSourceToStatus(source) {
-  if (source.includes('Gemini') || source.includes('AI复核')) return 'fitting_adjustment';
-  if (source.includes('导出')) return 'manufacturing_confirmed';
-  return 'ai_initial';
-}
-
-function recordSocketVersion(source) {
+function recordSocketVersion(source, options = {}) {
+  if (!socketMesh) return null;
+  const previous = selectedVersion() || socketVersions.at(-1) || null;
   const snapshot = {
-    id: `V${socketVersions.length + 1}`,
+    id: `V${nextVersionNumber++}`,
     source,
     createdAt: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+    geometry: socketMesh.geometry.clone(),
     params: {
       offsetMm: Number(controls.offset.value),
       trimPercent: Number(controls.trim.value),
@@ -1446,9 +1563,12 @@ function recordSocketVersion(source) {
     },
     patient: patientContext(),
     semanticActions: currentGenerationMeta?.semanticActions || [],
-    volumeConservation: currentGenerationMeta?.volumeConservation || null
+    volumeConservation: currentGenerationMeta?.volumeConservation || null,
+    generationMeta: structuredCloneSafe(currentGenerationMeta),
+    geminiRefinement: structuredCloneSafe(geminiRefinement),
+    riskZones: structuredCloneSafe(currentRiskZones),
+    manual: Boolean(options.manual)
   };
-  const previous = socketVersions.at(-1);
   snapshot.delta = previous ? {
     offsetMm: snapshot.params.offsetMm - previous.params.offsetMm,
     trimPercent: snapshot.params.trimPercent - previous.params.trimPercent,
@@ -1457,15 +1577,41 @@ function recordSocketVersion(source) {
     volumeMm3: (snapshot.volumeConservation?.releasedMm3 || 0) - (previous.volumeConservation?.releasedMm3 || 0)
   } : null;
   socketVersions.push(snapshot);
-  if (socketVersions.length > 6) socketVersions = socketVersions.slice(-6);
+  while (socketVersions.length > 8) {
+    const removed = socketVersions.shift();
+    removed.geometry?.dispose?.();
+  }
+  selectedVersionId = snapshot.id;
   renderVersionDelta();
+  renderSidebarVersions();
   updateMetrics(true);
-  syncVersionToBackend(source, mapSourceToStatus(source));
+  void syncVersionToBackend(source, mapSourceToStatus(source));
+  return snapshot;
+}
+
+function selectedVersion() {
+  return socketVersions.find((version) => version.id === selectedVersionId) || socketVersions.at(-1) || null;
+}
+
+function structuredCloneSafe(value) {
+  if (!value) return value;
+  try {
+    return structuredClone(value);
+  } catch (_error) {
+    return JSON.parse(JSON.stringify(value));
+  }
+}
+
+function disposeSocketVersions() {
+  socketVersions.forEach((version) => version.geometry?.dispose?.());
+  socketVersions = [];
+  selectedVersionId = null;
+  nextVersionNumber = 1;
 }
 
 function renderVersionDelta() {
   if (!versionDelta) return;
-  const latest = socketVersions.at(-1);
+  const latest = selectedVersion();
   if (!latest) {
     versionDelta.innerHTML = '<div class="empty">生成接受腔后，系统会记录版本参数与体积补偿 Delta。</div>';
     return;
@@ -1524,6 +1670,7 @@ function normalizeImportedMesh(mesh) {
   normalized.name = mesh.name || '导入残肢扫描';
   normalized.castShadow = true;
   normalized.receiveShadow = true;
+  normalized.renderOrder = 1;
   return normalized;
 }
 
@@ -1651,14 +1798,15 @@ function setLimb(mesh, profile = null) {
   if (socketMesh) scene.remove(socketMesh);
   if (wireMesh) scene.remove(wireMesh);
   heatGroup.clear();
-  markerGroup.clear();
+  clearPaintMarkers();
   socketMesh = null;
   wireMesh = null;
   currentRiskZones = [];
   semanticMap = null;
   currentGenerationMeta = null;
-  socketVersions = [];
+  disposeSocketVersions();
   geminiRefinement = null;
+  completedWorkflowSteps = new Set();
   limbMesh = mesh;
   scene.add(limbMesh);
   modelProfile = profile || profileFromGeometry(mesh);
@@ -1667,12 +1815,13 @@ function setLimb(mesh, profile = null) {
   applySemanticColorsToLimb(limbMesh, semanticMap);
   renderSemanticTags();
   renderVersionDelta();
+  renderSidebarVersions();
   metrics = calculateMetrics(modelProfile);
   updateMetrics(false);
   setAiState('待生成');
-  recommendations.innerHTML = '<div class="empty">残肢模型已载入，AI语义标签已生成。点击“AI生成接受腔”，系统会按不同标签自动匹配包容、减压和承重调整。</div>';
+  recommendations.innerHTML = '<div class="empty">残肢模型已载入，AI 语义标签已生成。点击“算法生成接受腔”，系统会按不同标签自动匹配包容、减压和承重调整。</div>';
   geminiResult.innerHTML = '<span class="eyebrow">大模型复核</span><div class="empty">生成初版后，可调用 Gemini 分析参数、预览图和风险区，返回结构化校正结果。</div>';
-  activateStep('scan');
+  activateStep('landmarks', { complete: ['scan'] });
 }
 
 function applySmartDefaultTrim(profile) {
@@ -1722,25 +1871,29 @@ function generateSocket() {
   if (!modelProfile) loadSample();
   setAiState('分析中');
   activateStep('ai');
+  clearPaintMarkers();
 
   window.setTimeout(() => {
     const geometry = createSocketGeometry();
     if (socketMesh) scene.remove(socketMesh);
     if (wireMesh) scene.remove(wireMesh);
     socketMesh = new THREE.Mesh(geometry, socketMaterial);
-    socketMesh.name = 'AI初始接受腔';
+    socketMesh.renderOrder = 2;
+    socketMesh.name = 'AI 初始接受腔';
     wireMesh = new THREE.Mesh(geometry.clone(), wireMaterial);
+    wireMesh.renderOrder = 3;
     wireMesh.visible = controls.wireToggle.checked;
     scene.add(socketMesh, wireMesh);
     currentRiskZones = defaultRiskZones();
+    clearPaintUndoStack();
     buildHeatZones();
+    if (sectionMode) applySectionClipping();
     setAiState('已生成');
     updateRecommendations();
     updateMetrics(true);
     recordSocketVersion('算法生成');
-    activateStep('risk');
-    window.setTimeout(() => activateStep('edit'), 300);
-    hint.textContent = 'AI初版已生成。打开“局部减压画笔”后，在接受腔表面点击可添加局部外扩修形。';
+    activateStep('ai', { complete: ['scan', 'landmarks'], uncomplete: ['ai', 'edit', 'export'] });
+    hint.textContent = 'AI 初版已生成。打开“局部减压画笔”后，在接受腔表面点击可添加局部外扩修形。';
   }, 420);
 }
 
@@ -1749,11 +1902,14 @@ function refreshSocketGeometry() {
   const geometry = createSocketGeometry();
   socketMesh.geometry.dispose();
   socketMesh.geometry = geometry;
+  clearPaintUndoStack();
+  clearPaintMarkers();
   if (wireMesh) {
     wireMesh.geometry.dispose();
     wireMesh.geometry = geometry.clone();
   }
   buildHeatZones();
+  if (sectionMode) applySectionClipping();
   updateRecommendations();
   updateMetrics(true);
 }
@@ -1777,7 +1933,7 @@ function createSocketGeometry() {
   let releaseDenominator = 0;
   const rawSections = usable.map((p, sectionIndex) => {
     const t = p.y / Math.max(maxY, 0.001);
-    const brimClearance = 0.0012 * smoothStep(0.82, 1, t);
+    const brimClearance = 0.00035 * smoothStep(0.82, 1, t);
     const distalCup = distal * Math.max(0, 1 - t / 0.22) ** 2;
     const reliefBand = relief * Math.exp(-(((t - 0.52) / 0.19) ** 2));
     const sourceRadii = Array.isArray(p.radii)
@@ -1786,7 +1942,7 @@ function createSocketGeometry() {
     const samples = sourceRadii.map((r, index) => {
       const theta = (index / sourceRadii.length) * Math.PI * 2;
       const anteriorRelief = reliefBand * Math.max(0, Math.cos(theta)) ** 8;
-      const medialLateralEase = relief * 0.28 * Math.max(0, Math.sin(theta) ** 2) * Math.exp(-(((t - 0.62) / 0.24) ** 2));
+      const medialLateralEase = relief * 0.16 * Math.max(0, Math.sin(theta) ** 2) * Math.exp(-(((t - 0.62) / 0.24) ** 2));
       const labelId = semanticLabelAt(sectionIndex, Math.round((index / sourceRadii.length) * PROFILE_SEGMENTS));
       const semanticRule = semanticSocketGeometryDeformation(labelId, t, theta);
       const semanticBias = Math.max(0, semanticRule.meters);
@@ -1843,7 +1999,7 @@ function createSocketGeometry() {
     },
     semanticActions: summarizeSemanticActions()
   };
-  return createSectionedGeometry(profile, PROFILE_SEGMENTS);
+  return createSectionedGeometry(profile, PROFILE_SEGMENTS, { closeDistal: true });
 }
 
 function effectiveSocketTrimRatio(profile, requestedTrim) {
@@ -1990,25 +2146,18 @@ function averageSectionRadius(section) {
 function preventInwardProximalTaper(profile) {
   if (!profile.length) return profile;
   const result = profile.map((section) => ({ ...section, radii: [...section.radii] }));
-  let runningMean = result[0].r;
-  const startT = 0.48;
+  const startT = 0.58;
 
   for (let i = 1; i < result.length; i += 1) {
     const t = i / Math.max(1, result.length - 1);
     const guard = smoothStep(startT, 0.92, t);
-    const rimEase = smoothStep(0.72, 1, t);
     const section = result[i];
-    const mean = section.radii.reduce((sum, radius) => sum + radius, 0) / section.radii.length;
-    const minMean = runningMean - 0.004 + rimEase * 0.0004;
-    const meanLift = guard > 0 && mean < minMean ? (minMean - mean) * guard : 0;
     const radii = section.radii.map((radius, j) => {
       if (guard <= 0) return radius;
       const prev = result[i - 1].radii[j];
-      const localMin = prev - 0.006 + rimEase * 0.0004;
-      return Math.max(radius + meanLift, THREE.MathUtils.lerp(radius, localMin, guard * 0.12));
+      const localMin = prev - 0.012;
+      return Math.max(radius, THREE.MathUtils.lerp(radius, localMin, guard * 0.05));
     });
-    const nextMean = radii.reduce((sum, radius) => sum + radius, 0) / radii.length;
-    runningMean = Math.max(runningMean * 0.996, nextMean);
     result[i] = {
       ...section,
       radii,
@@ -2038,20 +2187,16 @@ function fairClinicalSocketProfile(profile) {
     };
   });
 
-  let runningMean = result[0].r;
   for (let i = 1; i < result.length; i += 1) {
     const t = i / Math.max(1, result.length - 1);
     const preserveProximalContour = smoothStep(0.66, 1, t);
-    const upperGuard = smoothStep(0.42, 0.9, t) * (1 - preserveProximalContour * 0.65);
-    const rimOpen = smoothStep(0.62, 1, t);
-    const mean = result[i].r;
-    const minMean = runningMean - 0.0055 + rimOpen * 0.0002;
-    const lift = mean < minMean ? (minMean - mean) * upperGuard : 0;
-    const radii = result[i].radii.map((radius) => {
-      const guarded = radius + lift;
+    const upperGuard = smoothStep(0.42, 0.9, t) * (1 - preserveProximalContour * 0.85);
+    const prev = result[i - 1];
+    const radii = result[i].radii.map((radius, j) => {
+      const localMin = (prev.radii[j] || radius) - 0.011;
+      const guarded = Math.max(radius, THREE.MathUtils.lerp(radius, localMin, upperGuard * 0.08));
       return Math.max(MIN_SECTION_RADIUS, guarded);
     });
-    runningMean = Math.max(runningMean * 0.995, radii.reduce((sum, value) => sum + value, 0) / radii.length);
     result[i] = {
       ...result[i],
       radii,
@@ -2063,7 +2208,7 @@ function fairClinicalSocketProfile(profile) {
 
 function enforceSocketContainsLimb(socketProfile, limbProfile, offsetMeters) {
   if (!socketProfile.length || !limbProfile?.length) return socketProfile;
-  const clearance = Math.max(0.003, offsetMeters * 0.62);
+  const clearance = clamp(offsetMeters * 0.18, 0.00035, 0.0012);
   return socketProfile.map((section) => {
     const limbSection = nearestProfileSection(limbProfile, section.y);
     const limbRadii = Array.isArray(limbSection.radii)
@@ -2093,10 +2238,10 @@ function enforceSocketContainsLimb(socketProfile, limbProfile, offsetMeters) {
       const limbX = (limbSection.centerX || 0) + Math.cos(limbTheta) * limbRadius;
       const limbZ = (limbSection.centerZ || 0) + Math.sin(limbTheta) * limbRadius;
       const projectedRadius = Math.hypot(limbX - (section.centerX || 0), limbZ - (section.centerZ || 0));
-      const directionalGuard = (isPosteriorSupport ? 0.0002 : 0.0008) * Math.max(0, Math.cos(theta - limbTheta));
+      const directionalGuard = (isPosteriorSupport ? 0.00005 : 0.00022) * Math.max(0, Math.cos(theta - limbTheta));
       const minRadius = projectedRadius + clearance + directionalGuard;
-      if (isPosteriorSupport) return Math.max(radius, Math.min(minRadius, radius + 0.001));
-      if (isProximal && !isSensitiveRelief) return Math.max(radius, Math.min(minRadius, radius + 0.0014));
+      if (isPosteriorSupport) return Math.max(radius, Math.min(minRadius, radius + 0.00035));
+      if (isProximal && !isSensitiveRelief) return Math.max(radius, Math.min(minRadius, radius + 0.00055));
       return Math.max(radius, minRadius);
     });
     const faired = smoothCircular(radii, 2).map((radius, j) => {
@@ -2257,9 +2402,11 @@ function buildHeatZones() {
       color: riskColorHex(zone.color),
       transparent: true,
       opacity: zone.severity === 'high' ? 0.55 : 0.38,
+      side: THREE.DoubleSide,
       depthWrite: false
     });
     mesh.name = zone.label;
+    mesh.renderOrder = 4;
     heatGroup.add(mesh);
   });
   heatGroup.visible = controls.heatToggle.checked;
@@ -2360,12 +2507,12 @@ function updateRecommendations() {
     .join('、') || '当前无明显高曲率骨突';
   const baseCards = [
     ['整体包容量', `残肢最大围度约 ${Math.round(metrics.circumference * 1000)} mm，初始外扩 ${offset.toFixed(1)} mm，用于预留软组织形变与袜套空间。`, false],
-    ['语义标签驱动', `AI已识别 ${semanticMap?.labelCount || 0} 类残肢标签；${highLabels} 等高风险区会自动增加局部减压，后侧软组织区作为承重参考，不再对初版几何做向内收缩。`, true],
+    ['语义标签驱动', `AI 已识别 ${semanticMap?.labelCount || 0} 类残肢标签；${highLabels} 等高风险区会自动增加局部减压，后侧软组织区作为承重参考，不再对初版几何做向内收缩。`, true],
     ['患者画像系数', `${patient.activityLevel} 活动等级、${patient.bodyWeightKg} kg、${tissueLabel(patient.tissueFirmness)}软组织：稳定系数 ${patient.stabilityCoeff.toFixed(2)}，敏感区减压系数 ${patient.sensitivityCoeff.toFixed(2)}。`, false],
     ['体积守恒补偿', volume ? `承重区回收 ${volume.removedMm3} mm³，系统自动在减压区和近端边缘释放 ${volume.releasedMm3} mm³，避免局部收紧后整体过压。` : '生成后将计算承重区回收体积，并在减压区或边缘区进行补偿释放。', false],
     ['胫骨前缘减压', `识别为高压敏感区，基础减压 ${relief.toFixed(1)} mm，并叠加语义标签对应的局部调整量。`, true],
     ['末端包容', `远端区域增加 ${distal.toFixed(1)} mm 包容，减少末端集中承压，适合作为初版试穿前方案。`, false],
-    ['近端修边', `修边高度设置为残肢扫描高度的 ${trim}%；AI保留较高包覆以保证悬吊与稳定性。`, false]
+    ['近端修边', `修边高度设置为残肢扫描高度的 ${trim}%；AI 保留较高包覆以保证悬吊与稳定性。`, false]
   ].map(([title, body, warn]) => `<div class="rec ${warn ? 'warn' : ''}"><strong>${title}</strong>${body}</div>`).join('');
 
   const riskCards = currentRiskZones.map((zone) => (
@@ -2407,7 +2554,14 @@ function updateOutputs() {
   outputs.trim.textContent = `${controls.trim.value}%`;
   outputs.relief.textContent = `${Number(controls.relief.value).toFixed(1)} mm`;
   outputs.distal.textContent = `${Number(controls.distal.value).toFixed(1)} mm`;
+  if (outputs.brushStrength) outputs.brushStrength.textContent = `${brushStrengthMm().toFixed(1)} mm`;
   if (outputs.weight) outputs.weight.textContent = `${controls.bodyWeight?.value || 70} kg`;
+}
+
+function syncUserAvatar() {
+  if (!userName || !userAvatar) return;
+  const firstChar = Array.from(userName.textContent.trim()).find((char) => char.trim());
+  userAvatar.textContent = firstChar || '用';
 }
 
 async function refineWithGemini() {
@@ -2417,7 +2571,7 @@ async function refineWithGemini() {
     return;
   }
   if (!metrics) return;
-  setAiState('Gemini复核中');
+  setAiState('Gemini 复核中');
   geminiResult.innerHTML = '<span class="eyebrow">大模型复核</span><div class="empty">正在把当前参数、几何摘要和3D预览交给 Gemini 分析...</div>';
 
   const payload = {
@@ -2435,7 +2589,7 @@ async function refineWithGemini() {
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || 'Gemini request failed');
     applyGeminiRefinement(data.result, data.model);
-    setAiState('Gemini已复核');
+    setAiState('Gemini 已复核');
   } catch (error) {
     const fallback = localRefinementFallback();
     applyGeminiRefinement(fallback, '本地规则兜底');
@@ -2448,23 +2602,27 @@ async function refineWithGemini() {
 }
 
 function apiUrl(path) {
-  return socketApi.apiUrl(path);
+  if (window.location.protocol === 'file:') {
+    throw new Error('当前页面是以 file:// 打开的，没有本地后端。请从 SocketAI-Designer-Demo.exe 启动。');
+  }
+  if (socketApi.isOnline()) {
+    return socketApi.apiUrl(path);
+  }
+  return new URL(path, window.location.origin).toString();
 }
 
 async function ensureBackendReady() {
   const response = await fetch(apiUrl('/api/health'), { cache: 'no-store' });
-  if (!response.ok) throw new Error(`后端健康检查失败：HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`本地后端健康检查失败：HTTP ${response.status}`);
   const data = await response.json();
-  if (!data.ok) throw new Error('后端未就绪');
+  if (!data.ok) throw new Error('本地后端未就绪');
+  if (!data.hasGeminiKey) throw new Error('本机环境变量 GEMINI_API_KEY 未设置');
 }
 
 function explainFetchError(error) {
   const message = String(error.message || error);
   if (message === 'Failed to fetch') {
-    if (window.location.protocol === 'file:') {
-      return '浏览器没有连到本地后端。请从 SocketAI-Designer-Demo.exe 启动。';
-    }
-    return '无法连接 SocketAI 后端，请检查 /socketai/api/ 是否可用。';
+    return '浏览器没有连到本地后端。请关闭旧标签页，重新运行新版 exe；不要关闭启动后的本地服务进程。';
   }
   return message.slice(0, 220);
 }
@@ -2532,16 +2690,18 @@ function buildModelSummary() {
 function applyGeminiRefinement(result, modelName) {
   geminiRefinement = sanitizeRefinement(result);
   const c = geminiRefinement.parameterCorrections;
-  controls.offset.value = clamp(Number(controls.offset.value) + c.offsetDeltaMm, 2, 14);
+  controls.offset.value = clamp(Number(controls.offset.value) + c.offsetDeltaMm, 0.5, 14);
   controls.trim.value = clamp(Number(controls.trim.value) + c.trimDeltaPercent, 50, 90);
   controls.relief.value = clamp(Number(controls.relief.value) + c.reliefDeltaMm, 0, 10);
   controls.distal.value = clamp(Number(controls.distal.value) + c.distalDeltaMm, 0, 18);
   currentRiskZones = geminiRefinement.riskZones;
   updateOutputs();
   refreshSocketGeometry();
-  recordSocketVersion('Gemini复核');
+  recordSocketVersion('Gemini 复核');
   renderGeminiResult(modelName);
-  hint.textContent = 'Gemini复核完成：参数已保守校正，风险热图已按红/黄/绿等级重新标注。';
+  activateStep('edit', { complete: ['scan', 'landmarks', 'ai'], uncomplete: ['edit', 'export'] });
+  setInspectorPane('params');
+  hint.textContent = 'Gemini 复核完成：参数已保守校正，风险热图已按红/黄/绿等级重新标注。';
 }
 
 function sanitizeRefinement(result) {
@@ -2645,87 +2805,248 @@ function setAiState(text) {
   aiState.textContent = text;
 }
 
-function activateStep(stepName) {
+function activateStep(stepName, options = {}) {
+  (options.complete || []).forEach((stepId) => completedWorkflowSteps.add(stepId));
+  (options.uncomplete || []).forEach((stepId) => completedWorkflowSteps.delete(stepId));
+  const activeIndex = Math.max(0, WORKFLOW_STEPS.findIndex((step) => step.id === stepName));
   document.querySelectorAll('.step').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.step === stepName);
+    btn.classList.toggle('done', completedWorkflowSteps.has(btn.dataset.step));
   });
+  const active = WORKFLOW_STEPS[activeIndex] || WORKFLOW_STEPS[0];
+  if (currentStepTitle) currentStepTitle.textContent = active.title;
+  if (currentStepNote) currentStepNote.textContent = active.note;
+  if (workflowProgress) workflowProgress.style.width = `${active.progress}%`;
+  if (workflowNext) workflowNext.textContent = active.next;
+}
+
+function renderSidebarVersions() {
+  if (!versionTimeline) return;
+  if (!socketVersions.length) {
+    versionTimeline.innerHTML = '<div class="timeline-empty">生成接受腔后，这里会记录真实版本。</div>';
+    if (deleteVersionBtn) deleteVersionBtn.disabled = true;
+    return;
+  }
+  if (!selectedVersionId || !socketVersions.some((version) => version.id === selectedVersionId)) {
+    selectedVersionId = socketVersions.at(-1).id;
+  }
+  versionTimeline.innerHTML = socketVersions
+    .slice()
+    .reverse()
+    .map((version, index) => {
+      const delta = version.delta ? `Delta ${signed(version.delta.offsetMm)} mm` : '初始版本';
+      const active = version.id === selectedVersionId;
+      return `
+        <button class="version ${active ? 'active' : ''}" type="button" data-version-id="${version.id}">
+          <strong>${version.id} ${escapeHtml(version.source)}</strong>
+          <small>${version.createdAt} · ${delta}</small>
+        </button>
+      `;
+    })
+    .join('');
+  if (deleteVersionBtn) deleteVersionBtn.disabled = socketVersions.length === 0;
+}
+
+function applyVersionParams(version) {
+  if (!version?.params) return;
+  controls.offset.value = String(version.params.offsetMm);
+  controls.trim.value = String(version.params.trimPercent);
+  controls.relief.value = String(version.params.reliefMm);
+  controls.distal.value = String(version.params.distalMm);
+  updateOutputs();
+}
+
+function restoreSocketVersion(versionId) {
+  const version = socketVersions.find((item) => item.id === versionId);
+  if (!version?.geometry || !socketMesh) return;
+  selectedVersionId = version.id;
+  socketMesh.geometry.dispose();
+  socketMesh.geometry = version.geometry.clone();
+  if (wireMesh) {
+    wireMesh.geometry.dispose();
+    wireMesh.geometry = socketMesh.geometry.clone();
+  }
+  applyVersionParams(version);
+  currentGenerationMeta = structuredCloneSafe(version.generationMeta) || {
+    volumeConservation: version.volumeConservation,
+    semanticActions: version.semanticActions
+  };
+  geminiRefinement = structuredCloneSafe(version.geminiRefinement);
+  currentRiskZones = structuredCloneSafe(version.riskZones) || [];
+  clearPaintUndoStack();
+  clearPaintMarkers();
+  buildHeatZones();
+  if (sectionMode) applySectionClipping();
+  renderVersionDelta();
+  renderSidebarVersions();
+  updateRecommendations();
+  updateMetrics(true);
+  hint.textContent = `已切换到 ${version.id} · ${version.source}。`;
+}
+
+function addManualVersion() {
+  if (!socketMesh) {
+    hint.textContent = '请先生成接受腔，再手动新增版本。';
+    return;
+  }
+  recordSocketVersion('手动新增', { manual: true });
+  activateStep('edit', { complete: ['scan', 'landmarks'] });
+  setInspectorPane('params');
+  hint.textContent = `已基于上一版新增 ${selectedVersionId}，可继续调整参数或画笔。`;
+}
+
+function deleteSelectedVersion() {
+  const version = selectedVersion();
+  if (!version) return;
+  const index = socketVersions.findIndex((item) => item.id === version.id);
+  if (index < 0) return;
+  const [removed] = socketVersions.splice(index, 1);
+  removed.geometry?.dispose?.();
+  selectedVersionId = socketVersions[Math.max(0, index - 1)]?.id || socketVersions.at(-1)?.id || null;
+  if (selectedVersionId) {
+    restoreSocketVersion(selectedVersionId);
+  } else {
+    if (socketMesh) {
+      scene.remove(socketMesh);
+      socketMesh.geometry.dispose();
+      socketMesh = null;
+    }
+    if (wireMesh) {
+      scene.remove(wireMesh);
+      wireMesh.geometry.dispose();
+      wireMesh = null;
+    }
+    currentGenerationMeta = null;
+    renderVersionDelta();
+    renderSidebarVersions();
+    updateMetrics(false);
+    activateStep('landmarks', { complete: ['scan'], uncomplete: ['landmarks', 'ai', 'edit', 'export'] });
+  }
+  hint.textContent = `已删除 ${removed.id}。`;
 }
 
 async function importModel(file) {
-  const ext = file.name.split('.').pop().toLowerCase();
-  const buffer = await file.arrayBuffer();
-  let mesh = null;
-  if (ext === 'stl') {
-    const geometry = new STLLoader().parse(buffer);
-    mesh = new THREE.Mesh(geometry, limbMaterial);
-  } else if (ext === 'obj') {
-    const text = new TextDecoder().decode(buffer);
-    const obj = new OBJLoader().parse(text);
-    const meshes = [];
-    obj.traverse((child) => {
-      if (child.isMesh) meshes.push(child);
-    });
-    if (meshes.length === 1) {
-      mesh = meshes[0];
-    } else {
-      mesh = obj;
+  fileInput.disabled = true;
+  hint.textContent = `正在导入 ${file.name}...`;
+  activateStep('scan', { uncomplete: ['scan', 'landmarks', 'ai', 'edit', 'export'] });
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  try {
+    const ext = file.name.split('.').pop().toLowerCase();
+    const buffer = await file.arrayBuffer();
+    let mesh = null;
+    if (ext === 'stl') {
+      const geometry = new STLLoader().parse(buffer);
+      mesh = new THREE.Mesh(geometry, limbMaterial);
+    } else if (ext === 'obj') {
+      const text = new TextDecoder().decode(buffer);
+      const obj = new OBJLoader().parse(text);
+      const meshes = [];
+      obj.traverse((child) => {
+        if (child.isMesh) meshes.push(child);
+      });
+      if (meshes.length === 1) {
+        mesh = meshes[0];
+      } else {
+        mesh = obj;
+      }
     }
-  }
-  if (!mesh) return;
-  const normalized = normalizeImportedMesh(mesh);
-  setLimb(normalized);
-  if (socketApi.isOnline()) {
-    try {
-      await socketApi.uploadScan(file, metrics || {});
-      await refreshCasePanelFromServer();
-      hint.textContent = '扫描模型已导入，并已同步到云端病例。';
-    } catch (error) {
-      hint.textContent = `扫描已导入，但云端上传失败：${error.message}`;
+    if (!mesh) throw new Error('未找到可用网格');
+    const normalized = normalizeImportedMesh(mesh);
+    setLimb(normalized);
+    hint.textContent = `已导入 ${file.name}`;
+    if (socketApi.isOnline()) {
+      try {
+        await socketApi.uploadScan(file, metrics || {});
+        await refreshCasePanelFromServer();
+      } catch (error) {
+        console.warn('扫描上传失败:', error);
+      }
     }
+  } catch (error) {
+    hint.textContent = `模型导入失败：${error?.message || error}`;
+    console.error(error);
+  } finally {
+    fileInput.disabled = false;
+    fileInput.value = '';
   }
-  activateStep('landmarks');
 }
 
 function setVisibility(mode) {
+  currentViewMode = mode;
   if (limbMesh) limbMesh.visible = mode !== 'socket';
   if (socketMesh) socketMesh.visible = mode !== 'limb';
   if (wireMesh) wireMesh.visible = mode !== 'limb' && controls.wireToggle.checked;
   heatGroup.visible = mode !== 'limb' && controls.heatToggle.checked;
   limbMaterial.transparent = mode === 'both';
   limbMaterial.opacity = mode === 'both' ? 0.32 : 1;
-  limbMaterial.depthWrite = true;
+  limbMaterial.depthWrite = mode !== 'both';
   limbMaterial.needsUpdate = true;
   socketMaterial.opacity = mode === 'both' ? 0.82 : 0.72;
-  socketMaterial.depthWrite = true;
+  socketMaterial.depthWrite = false;
   socketMaterial.needsUpdate = true;
+  if (mode === 'limb') brushCursor.visible = false;
 }
 
 function setToolButton(id) {
-  document.querySelectorAll('.viewer-toolbar .tool').forEach((btn) => btn.classList.remove('active'));
+  document.querySelectorAll('#viewBoth, #viewSocket, #viewLimb').forEach((btn) => btn.classList.remove('active'));
   document.querySelector(id).classList.add('active');
+}
+
+function updateSectionPlane() {
+  const source = socketMesh || limbMesh;
+  if (!source) return;
+  const box = new THREE.Box3().setFromObject(source);
+  const ratio = clamp(Number(sectionHeight?.value || 50) / 100, 0, 1);
+  const y = THREE.MathUtils.lerp(box.min.y, box.max.y, ratio);
+  sectionPlane.constant = y;
+  if (sectionHeightOut) sectionHeightOut.textContent = `${Math.round(ratio * 100)}%`;
+}
+
+function applySectionClipping() {
+  updateSectionPlane();
+  renderer.localClippingEnabled = sectionMode;
+  [limbMaterial, socketMaterial, wireMaterial, heatMaterial].forEach((mat) => {
+    mat.clippingPlanes = sectionMode ? [sectionPlane] : [];
+    mat.needsUpdate = true;
+  });
 }
 
 function applySectionMode() {
   sectionMode = !sectionMode;
-  const plane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0.018);
-  renderer.localClippingEnabled = sectionMode;
-  [limbMaterial, socketMaterial, wireMaterial, heatMaterial].forEach((mat) => {
-    mat.clippingPlanes = sectionMode ? [plane] : [];
-    mat.needsUpdate = true;
-  });
+  if (sectionControls) sectionControls.hidden = !sectionMode;
+  applySectionClipping();
   document.querySelector('#sectionBtn').classList.toggle('active', sectionMode);
+  hint.textContent = sectionMode
+    ? '剖切预览已开启：拖动高度滑条查看接受腔与残肢的截面关系。'
+    : '剖切预览已关闭。';
 }
 
 function togglePaintMode() {
   paintMode = !paintMode;
   document.querySelector('#paintBtn').classList.toggle('active', paintMode);
+  viewer.classList.toggle('painting', paintMode);
+  brushCursor.visible = false;
   hint.textContent = paintMode
-    ? '局部减压画笔已开启：点击接受腔表面，系统会在该处外扩并留下编辑标记。'
-    : '可拖拽旋转、滚轮缩放。点击“AI生成接受腔”后可用画笔在模型上添加局部减压。';
+    ? '局部减压画笔已开启：移动到接受腔表面可预览画笔半径，点击后添加局部外扩修形。'
+    : '可拖拽旋转、滚轮缩放。点击“算法生成接受腔”后，可用画笔在模型上添加局部减压。';
 }
 
-function paintRelief(event) {
-  if (!paintMode || !socketMesh) return;
+function brushStrengthMm() {
+  return Number(controls.brushStrength?.value || 1.5);
+}
+
+function brushRadiusMeters() {
+  return 0.025 + brushStrengthMm() * 0.02;
+}
+
+function updateBrushCursorGeometry() {
+  const radius = brushRadiusMeters();
+  brushCursor.geometry.dispose();
+  brushCursor.geometry = new THREE.TorusGeometry(radius, Math.max(0.0008, radius * 0.022), 8, 72);
+}
+
+function pointerToSocketHit(event) {
+  if (!socketMesh) return null;
   const rect = renderer.domElement.getBoundingClientRect();
   const mouse = new THREE.Vector2(
     ((event.clientX - rect.left) / rect.width) * 2 - 1,
@@ -2733,19 +3054,94 @@ function paintRelief(event) {
   );
   const raycaster = new THREE.Raycaster();
   raycaster.setFromCamera(mouse, camera);
-  const hit = raycaster.intersectObject(socketMesh)[0];
+  return raycaster.intersectObject(socketMesh)[0] || null;
+}
+
+function updateBrushCursor(event) {
+  if (!paintMode || !socketMesh || currentViewMode === 'limb') {
+    brushCursor.visible = false;
+    return;
+  }
+  const hit = pointerToSocketHit(event);
+  if (!hit) {
+    brushCursor.visible = false;
+    return;
+  }
+  const normal = hit.face?.normal
+    ? hit.face.normal.clone().transformDirection(socketMesh.matrixWorld).normalize()
+    : camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(-1).normalize();
+  brushCursor.position.copy(hit.point).addScaledVector(normal, 0.002);
+  brushCursor.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+  brushCursor.visible = true;
+}
+
+function clearPaintMarkers() {
+  markerGroup.children.forEach((marker) => {
+    marker.geometry?.dispose?.();
+  });
+  markerGroup.clear();
+}
+
+function clearPaintUndoStack() {
+  paintUndoStack.forEach((item) => item.geometry.dispose());
+  paintUndoStack = [];
+  if (undoPaintBtn) undoPaintBtn.disabled = true;
+}
+
+function pushPaintUndoSnapshot() {
+  if (!socketMesh) return null;
+  const snapshot = {
+    geometry: socketMesh.geometry.clone(),
+    marker: null
+  };
+  paintUndoStack.push(snapshot);
+  if (paintUndoStack.length > 12) {
+    const dropped = paintUndoStack.shift();
+    dropped.geometry.dispose();
+  }
+  if (undoPaintBtn) undoPaintBtn.disabled = paintUndoStack.length === 0;
+  return snapshot;
+}
+
+function undoPaintStep() {
+  const snapshot = paintUndoStack.pop();
+  if (!snapshot || !socketMesh) return;
+  socketMesh.geometry.dispose();
+  socketMesh.geometry = snapshot.geometry;
+  if (snapshot.marker) {
+    markerGroup.remove(snapshot.marker);
+    snapshot.marker.geometry.dispose();
+  }
+  if (wireMesh) {
+    wireMesh.geometry.dispose();
+    wireMesh.geometry = socketMesh.geometry.clone();
+  }
+  if (undoPaintBtn) undoPaintBtn.disabled = paintUndoStack.length === 0;
+  updateMetrics(true);
+  if (interactionFeedback) {
+    interactionFeedback.textContent = '已撤销上一步局部减压编辑。';
+    interactionFeedback.classList.add('active');
+  }
+  hint.textContent = '已撤销上一步局部减压编辑。';
+}
+
+function paintRelief(event) {
+  if (!paintMode || !socketMesh || currentViewMode === 'limb') return;
+  const hit = pointerToSocketHit(event);
   if (!hit) return;
 
+  const undoSnapshot = pushPaintUndoSnapshot();
   const pos = socketMesh.geometry.attributes.position;
   const center = hit.point.clone();
-  const radius = 0.055;
+  const radius = brushRadiusMeters();
+  const displacement = brushStrengthMm() / 1000;
   for (let i = 0; i < pos.count; i += 1) {
     const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
     const d = v.distanceTo(center);
     if (d < radius) {
       const falloff = (1 + Math.cos((d / radius) * Math.PI)) / 2;
       const outward = new THREE.Vector3(v.x, 0, v.z).normalize();
-      v.addScaledVector(outward, 0.008 * falloff);
+      v.addScaledVector(outward, displacement * falloff);
       pos.setXYZ(i, v.x, v.y, v.z);
     }
   }
@@ -2758,7 +3154,43 @@ function paintRelief(event) {
   const marker = new THREE.Mesh(new THREE.SphereGeometry(0.009, 16, 12), heatMaterial);
   marker.position.copy(center);
   markerGroup.add(marker);
-  activateStep('edit');
+  if (undoSnapshot) undoSnapshot.marker = marker;
+  updateMetrics(true);
+  if (interactionFeedback) {
+    interactionFeedback.textContent = `本次局部减压 +${brushStrengthMm().toFixed(1)} mm，影响半径约 ${Math.round(radius * 1000)} mm。`;
+    interactionFeedback.classList.add('active');
+  }
+  setInspectorPane('params');
+  updateBrushCursor(event);
+  activateStep('edit', { complete: ['scan', 'landmarks'] });
+}
+
+function resetView() {
+  camera.position.set(0.52, 0.38, 0.78);
+  orbit.target.set(0, 0.18, 0);
+  camera.near = 0.01;
+  camera.far = 100;
+  camera.updateProjectionMatrix();
+  orbit.update();
+  hint.textContent = '视角已重置。';
+}
+
+function fitViewToModel() {
+  const objects = [limbMesh, socketMesh].filter(Boolean);
+  if (!objects.length) return;
+  const box = new THREE.Box3();
+  objects.forEach((object) => box.expandByObject(object));
+  if (box.isEmpty()) return;
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const direction = camera.position.clone().sub(orbit.target).normalize();
+  const distance = Math.max(0.18, sphere.radius / Math.sin(THREE.MathUtils.degToRad(camera.fov) / 2) * 1.18);
+  orbit.target.copy(sphere.center);
+  camera.position.copy(sphere.center).addScaledVector(direction.lengthSq() ? direction : new THREE.Vector3(0.55, 0.42, 0.78).normalize(), distance);
+  camera.near = Math.max(0.001, distance / 100);
+  camera.far = Math.max(10, distance * 100);
+  camera.updateProjectionMatrix();
+  orbit.update();
+  hint.textContent = '模型已适配到视图中央。';
 }
 
 function geometryToStl(mesh) {
@@ -2790,6 +3222,7 @@ fileInput.addEventListener('change', (event) => {
 sampleBtn.addEventListener('click', loadSample);
 generateBtn.addEventListener('click', generateSocket);
 geminiBtn.addEventListener('click', refineWithGemini);
+userName?.addEventListener('input', syncUserAvatar);
 exportBtn.addEventListener('click', async () => {
   if (!socketMesh) generateSocket();
   if (!socketMesh) return;
@@ -2816,8 +3249,22 @@ exportBtn.addEventListener('click', async () => {
       console.warn('导出记录同步失败:', error);
     }
   }
-  activateStep('export');
+  activateStep('export', { complete: ['scan', 'landmarks', 'ai', 'edit', 'export'] });
+  setInspectorPane('manufacture');
   outputs.print.textContent = '已导出';
+});
+
+resetViewBtn?.addEventListener('click', resetView);
+fitViewBtn?.addEventListener('click', fitViewToModel);
+undoPaintBtn?.addEventListener('click', undoPaintStep);
+addVersionBtn?.addEventListener('click', addManualVersion);
+deleteVersionBtn?.addEventListener('click', deleteSelectedVersion);
+sectionHeight?.addEventListener('input', () => {
+  applySectionClipping();
+});
+controls.brushStrength?.addEventListener('input', () => {
+  updateOutputs();
+  updateBrushCursorGeometry();
 });
 
 ['offset', 'trim', 'relief', 'distal'].forEach((key) => {
@@ -2860,6 +3307,39 @@ controls.semanticToggle.addEventListener('change', () => {
   document.querySelector('#semanticBtn')?.classList.toggle('active', controls.semanticToggle.checked);
 });
 
+function setInspectorPane(paneId) {
+  document.querySelectorAll('.inspector-tab').forEach((tab) => {
+    const isActive = tab.dataset.pane === paneId;
+    tab.classList.toggle('active', isActive);
+    tab.setAttribute('aria-selected', String(isActive));
+  });
+  document.querySelectorAll('.inspector-pane').forEach((pane) => {
+    pane.classList.toggle('active', pane.dataset.pane === paneId);
+    pane.hidden = pane.dataset.pane !== paneId;
+  });
+}
+
+document.querySelectorAll('.inspector-tab').forEach((tab) => {
+  tab.addEventListener('click', () => setInspectorPane(tab.dataset.pane));
+});
+
+document.querySelectorAll('.step').forEach((stepButton) => {
+  stepButton.addEventListener('click', () => {
+    const step = WORKFLOW_STEPS.find((item) => item.id === stepButton.dataset.step);
+    if (!step) return;
+    activateStep(step.id);
+    setInspectorPane(step.pane);
+  });
+});
+
+versionTimeline?.addEventListener('click', (event) => {
+  const button = event.target.closest('.version');
+  if (!button) return;
+  restoreSocketVersion(button.dataset.versionId);
+  activateStep('export', { complete: ['scan', 'landmarks', 'ai', 'edit', 'export'] });
+  setInspectorPane('manufacture');
+});
+
 document.querySelector('#viewBoth').addEventListener('click', () => {
   setToolButton('#viewBoth');
   setVisibility('both');
@@ -2879,19 +3359,24 @@ document.querySelector('#semanticBtn').addEventListener('click', () => {
 });
 document.querySelector('#sectionBtn').addEventListener('click', applySectionMode);
 document.querySelector('#paintBtn').addEventListener('click', togglePaintMode);
-renderer.domElement.addEventListener('click', paintRelief);
-
-document.querySelectorAll('.step[data-step]').forEach((button) => {
-  button.addEventListener('click', () => activateStep(button.dataset.step));
+renderer.domElement.addEventListener('pointermove', updateBrushCursor);
+renderer.domElement.addEventListener('pointerleave', () => {
+  brushCursor.visible = false;
 });
+renderer.domElement.addEventListener('click', paintRelief);
 
 export function initWorkspace({ localOnly = false } = {}) {
   if (workspaceInitialized) return;
   workspaceInitialized = true;
 
   updateOutputs();
+  updateBrushCursorGeometry();
+  syncUserAvatar();
+  renderSidebarVersions();
   resize();
-  loadSample();
+  if (!localOnly) {
+    loadSample();
+  }
   animate();
 
   if (localOnly) {
@@ -2899,9 +3384,10 @@ export function initWorkspace({ localOnly = false } = {}) {
     return;
   }
 
-  window.addEventListener('socketai:case-loaded', (event) => {
+  window.addEventListener('socketai:case-loaded', async (event) => {
     const { caseInfo, versions, scans } = event.detail || {};
     if (!caseInfo) return;
+    const workflow = await import('./workflow-ui.js');
     workflow.updateCaseHeader(caseInfo);
     workflow.applyCaseToControls(caseInfo);
     workflow.renderVersionTimeline(versions || [], versions?.[0]?.id);
@@ -2913,4 +3399,3 @@ export function initWorkspace({ localOnly = false } = {}) {
     hint.textContent = '已加载云端病例。导入扫描或生成接受腔后，版本将自动保存。';
   });
 }
-
